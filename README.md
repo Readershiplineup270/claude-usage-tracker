@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/icon.png" width="84" alt="Claude Usage Tracker"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/icon.png" width="84" alt="Claude Usage Tracker"></p>
 
 # Claude Usage Tracker
 
@@ -12,12 +12,12 @@ same endpoint `/usage` uses. **Read-only** — it never modifies your credential
 talks to nothing but that one Anthropic endpoint.
 
 <p align="center">
-  <img src="docs/widget.png" alt="Always-on-top mini widget" width="420"><br>
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/widget.png" alt="Always-on-top mini widget" width="420"><br>
   <em>The always-on-top mini widget (sample data)</em>
 </p>
 
 <p align="center">
-  <img src="docs/dashboard.png" alt="Dashboard" width="560"><br>
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/dashboard.png" alt="Dashboard" width="560"><br>
   <em>The full dashboard — gauges, live reset countdowns, burn-rate, history, credits (sample data)</em>
 </p>
 
@@ -48,7 +48,7 @@ The 90–99% "black" band gets a red glow/outline so it reads as danger rather t
 empty.
 
 <p align="center">
-  <img src="docs/tray-icons.png" alt="Tray icon at various usage levels" width="560"><br>
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/tray-icons.png" alt="Tray icon at various usage levels" width="560"><br>
   <em>Tray icon at 5/40, 45/72, 85/94, 95/100, and 0/0 percent</em>
 </p>
 
