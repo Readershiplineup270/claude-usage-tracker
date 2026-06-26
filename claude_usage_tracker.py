@@ -597,7 +597,8 @@ def scan_sessions(cache: dict, now: float, window_s: int = 5 * 3600,
         if toks <= 0:
             continue
         cwd = ent.get("cwd")
-        name = os.path.basename(cwd.rstrip("/\\")) if cwd else Path(key).parent.name
+        # platform-independent basename (cwd uses Windows '\' even when scanned elsewhere)
+        name = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] if cwd else Path(key).parent.name
         a = agg.setdefault(name, {"name": name, "tokens": 0, "last": 0,
                                   "ctx": 0, "ctx_ts": 0, "max_ctx": 0})
         a["tokens"] += toks
@@ -902,7 +903,7 @@ def check_alerts(snap: dict, state: dict, cfg: dict) -> None:
     if isinstance(ctx, (int, float)) and not isinstance(ctx, bool):
         if ctx >= 90 and not al.get("context"):
             cwd = snap.get("cwd") or ""
-            name = os.path.basename(cwd.rstrip("/\\")) if cwd else "session"
+            name = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] if cwd else "session"
             notify("Context almost full", f"{name} at {ctx:.0f}% — consider /compact")
             al["context"] = True
         elif ctx < 80:
