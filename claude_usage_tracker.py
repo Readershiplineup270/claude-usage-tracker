@@ -69,6 +69,9 @@ CONFIG_PATH = APP_DIR / "config.json"
 STATE_PATH = APP_DIR / "state.json"
 HISTORY_PATH = APP_DIR / "history.json"
 SNAPSHOT_PATH = APP_DIR / "last_snapshot.json"
+# Written by the Claude Code statusline (scripts/statusline.py) on every render —
+# the app's primary, API-free source of live 5h/weekly usage.
+STATUSLINE_SNAPSHOT = Path(os.path.expanduser("~")) / ".claude" / "usage-snapshot.json"
 LOG_PATH = APP_DIR / "claude_usage_tracker.log"
 ICON_PATH = APP_DIR / "app_icon.png"
 ICO_PATH = APP_DIR / "app.ico"
@@ -84,7 +87,10 @@ BASE_HEADERS = {
 }
 
 DEFAULT_CONFIG = {
-    "poll_interval_seconds": 60,
+    "ui_refresh_seconds": 15,            # how often the loop refreshes the UI from the statusline file
+    "statusline_stale_seconds": 300,     # treat statusline data older than this as stale
+    "api_extras_interval_seconds": 1800, # how often to refresh overage/scoped extras from the API
+    "api_fallback_interval_seconds": 300,# min gap between API polls when no statusline data
     "threshold_step": 20,            # ping every N percent
     "windows": ["five_hour", "seven_day"],
     "notify_at_100": True,
@@ -501,6 +507,37 @@ def append_history(hist: dict, windows: dict, now_s: float, cap: int) -> None:
 # Snapshot (the JSON the dashboard consumes)
 # ---------------------------------------------------------------------------
 
+def read_statusline_snapshot():
+    """Read live 5h/weekly usage written by the Claude Code statusline (no API call).
+
+    Returns {"windows": {...}, "context": {...}, "ts": float} or None.
+    """
+    d = load_json(STATUSLINE_SNAPSHOT, None)
+    if not isinstance(d, dict):
+        return None
+    ts = d.get("ts")
+    if not isinstance(ts, (int, float)):
+        return None
+    windows = {}
+    for key in ("five_hour", "seven_day"):
+        w = d.get(key) or {}
+        pct = w.get("used_percentage")
+        if not isinstance(pct, (int, float)) or isinstance(pct, bool):
+            continue
+        ra = w.get("resets_at")
+        dt = None
+        if isinstance(ra, (int, float)):
+            try:
+                dt = datetime.fromtimestamp(ra, tz=timezone.utc).astimezone()
+            except Exception:
+                dt = None
+        windows[key] = {"pct": max(0.0, min(100.0, float(pct))), "resets_at": dt}
+    if not windows:
+        return None
+    return {"windows": windows, "context": d.get("context_window"),
+            "cwd": d.get("cwd"), "model": d.get("model"), "ts": float(ts)}
+
+
 def build_snapshot(r: FetchResult, hist: dict, cfg: dict) -> dict:
     now_s = time.time()
     oauth = read_oauth()
@@ -839,8 +876,8 @@ DASHBOARD_HTML = r"""<!doctype html>
   </div>
 
   <footer>
-    Reads your local Claude login (read-only) · refreshes automatically<br>
-    <span id="src">api.anthropic.com/api/oauth/usage</span>
+    Live usage from Claude Code's statusline data · read-only<br>
+    <span id="src">no endpoint polling — avoids rate limits</span>
   </footer>
 </div>
 
@@ -1426,51 +1463,71 @@ class TrayApp:
             log(f"visual update failed: {exc}")
 
     def _poll_loop(self):
-        interval = int(self.cfg.get("poll_interval_seconds", 60))
         timeout = int(self.cfg.get("request_timeout_seconds", 20))
         cap = int(self.cfg.get("history_cap", 2880))
+        ui_iv = int(self.cfg.get("ui_refresh_seconds", 15))
+        stale_secs = int(self.cfg.get("statusline_stale_seconds", 300))
+        extras_iv = int(self.cfg.get("api_extras_interval_seconds", 1800))
+        fallback_iv = int(self.cfg.get("api_fallback_interval_seconds", 300))
+        self._extra = getattr(self, "_extra", None)
+        last_api = 0.0
         warned_token = False
         while not self._stop.is_set():
             try:
-                r = fetch_usage(timeout)
+                now = time.time()
+                sl = read_statusline_snapshot()
+                fresh = bool(sl and (now - sl["ts"]) <= stale_secs)
+                # Prefer the statusline file (no API). Hit /api/oauth/usage only to
+                # occasionally refresh overage/scoped extras, or as a fallback when
+                # Claude Code isn't running — heavily rate-limited so we poll rarely.
+                if fresh:
+                    if now - last_api >= extras_iv:
+                        rr = fetch_usage(timeout)
+                        last_api = now
+                        if rr.ok:
+                            self._extra = rr.extra
+                    r = FetchResult(True, windows=sl["windows"], extra=self._extra)
+                    src = "statusline"
+                elif now - last_api >= fallback_iv:
+                    r = fetch_usage(timeout)
+                    last_api = now
+                    if r.ok:
+                        self._extra = r.extra
+                    src = "api"
+                else:
+                    r = FetchResult(False, error="waiting for Claude Code activity")
+                    src = "idle"
                 self.last = r
+
                 if r.ok:
-                    append_history(self.history, r.windows, time.time(), cap)
+                    append_history(self.history, r.windows, now, cap)
                     save_json(HISTORY_PATH, self.history)
                     check_thresholds(r.windows, self.state, self.cfg)
                     save_json(STATE_PATH, self.state)
                     warned_token = False
-                    log(f"ok: {status_line(r.windows)}")
+                    log(f"ok ({src}): {status_line(r.windows)}")
                     if not self._started_notified and self.cfg.get("notify_on_start", True):
                         notify(f"{APP_NAME} started", status_line(r.windows))
                         self._started_notified = True
+                    snap = build_snapshot(r, self.history, self.cfg)
+                    save_json(SNAPSHOT_PATH, snap)
                 else:
-                    log(f"fetch failed: {r.error}")
                     if r.token_state in (TokenState.EXPIRED, TokenState.MISSING) and not warned_token:
                         notify(APP_NAME, f"{r.error}. Run any Claude Code command to refresh your login.")
                         warned_token = True
-                if r.ok:
-                    snap = build_snapshot(r, self.history, self.cfg)
-                    save_json(SNAPSHOT_PATH, snap)   # so a restart shows last data, not an error
-                else:
-                    # Keep the last good reading; just flag the error + timestamp.
+                    # Keep the last good reading; just flag the state.
                     with STORE_LOCK:
                         snap = dict(STORE.get("snapshot", {}))
                     snap["ok"] = False
                     snap["error"] = r.error
                     snap["token_state"] = r.token_state
-                    snap["updated_at"] = int(time.time())
+                    snap["updated_at"] = int(now)
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
                 self._refresh_visual(r)
             except Exception:
                 log("poll loop error:\n" + traceback.format_exc())
-            # Back off on rate-limiting instead of hammering every interval.
-            wait = interval
-            if not self.last.ok and self.last.retry_after:
-                wait = max(interval, min(self.last.retry_after, 900))
-                log(f"backing off {wait}s after rate limit")
-            self._wake.wait(timeout=wait)
+            self._wake.wait(timeout=ui_iv)
             self._wake.clear()
 
 
