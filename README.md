@@ -156,6 +156,18 @@ Token refresh is handled by Claude Code itself; if your login expires, the track
 shows an error state until you run any `claude` command to refresh it. The token is
 only ever read — never written, logged, or sent anywhere but that endpoint.
 
+## Privacy
+
+Read-only and local. It reads your Claude login token and session logs from
+`~/.claude` and displays the numbers; it sends nothing anywhere except the Anthropic
+usage endpoint (using your own token). No telemetry, no analytics, no data collection.
+
+## Code signing
+
+Windows builds are signed with free code signing provided by
+[SignPath.io](https://signpath.io), with a free code signing certificate from the
+[SignPath Foundation](https://signpath.org).
+
 ## Layout
 
 ```
