@@ -28,8 +28,10 @@ talks to nothing but that one Anthropic endpoint.
 
 ## Features
 
-- **Always-on-top mini widget** — a tiny frameless, draggable strip (5h, weekly,
-  and the active terminal's **context %**) that stays on top. Toggle it from the tray.
+- **Always-on-top mini widget** — a frameless, draggable, **resizable** strip (5h,
+  weekly, and the active terminal's **context %**) that stays on top, with **Refresh**
+  and **Check for updates** buttons. Drag the corner to resize; the size is remembered.
+  Toggle it from the tray.
 - **Full dashboard** — animated ring gauges, live reset countdowns, a **burn-rate /
   time-to-limit projection** ("≈7%/h · hits 100% in ~1h 10m"), a usage history
   sparkline, overage credits, and per-model (Opus/Sonnet) scoped weekly limits.

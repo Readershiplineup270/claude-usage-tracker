@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.14"
+__version__ = "0.1.15"
 
 
 def _data_dir() -> Path:
@@ -111,7 +111,7 @@ DEFAULT_CONFIG = {
     "open_as_window": True,          # tray default action: native window vs browser
     "show_widget_on_start": True,    # show the always-on-top mini widget at launch
     "widget_width": 392,
-    "widget_height": 178,
+    "widget_height": 216,
 }
 
 LABELS = {
@@ -1817,7 +1817,7 @@ async function refresh(){
       $("updated").textContent="updated "+new Date(d.updated_at*1000).toLocaleTimeString();
     }else{
       $("livedot").style.background="#cda24e"; $("livetxt").textContent=wins.length?"stale":"offline";
-      $("updated").textContent=wins.length?"reconnecting… (rate limited)":"—";
+      $("updated").textContent=wins.length?("paused · "+(d.error||"waiting for Claude Code activity")):(d.error||"—");
     }
     wins.filter(w=>w.key==="five_hour"||w.key==="seven_day").forEach(renderGauge);
     LASTH=d.history; renderSpark(LASTH);
@@ -1871,58 +1871,84 @@ WIDGET_HTML = r"""<!doctype html>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   html,body{height:100%}
-  body{font:12px/1.4 -apple-system,"Segoe UI",Inter,system-ui,sans-serif;color:#e8eef6;
-    background:linear-gradient(180deg,#0e1422,#080b12);
-    border:1px solid rgba(255,255,255,.10);border-radius:13px;overflow:hidden;
-    padding:11px 13px;user-select:none;-webkit-user-select:none;cursor:default}
-  .top{display:flex;align-items:center;gap:7px;margin-bottom:10px;color:#8b97a8;font-size:10px}
-  .top .dot{width:6px;height:6px;border-radius:50%;background:#3fb950}
-  .top .ttl{letter-spacing:.3px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .top .tier{color:#e8eef6;font-size:13.5px;font-weight:700;text-transform:none;letter-spacing:.2px}
-  .top .verdict{margin-left:auto;font-weight:700;font-size:11px;padding-right:8px;white-space:nowrap}
-  .top .x{cursor:pointer;color:#6b7686;font-size:15px;line-height:1;padding:0 2px}
-  .top .x:hover{color:#e8eef6}
-  .row{display:flex;align-items:center;gap:10px;margin:8px 0}
-  .lab{width:32px;color:#aeb8c6;font-weight:650;font-size:11.5px}
-  .bar{flex:1;height:9px;border-radius:5px;background:rgba(255,255,255,.12);overflow:hidden}
-  .bar>i{display:block;height:100%;border-radius:5px;width:0;transition:width .7s cubic-bezier(.22,1,.36,1)}
-  .pc{width:40px;text-align:right;font-weight:720;font-size:15px;font-variant-numeric:tabular-nums}
-  .cd{width:60px;text-align:right;color:#8b97a8;font-size:10.5px;font-variant-numeric:tabular-nums}
-  .err{color:#ffb4ad;font-size:11px;padding:8px 2px}
+  :root{--ink:#e7e6e3;--dim:#9b9a95;--faint:#6c6b66;--accent:#d97757;
+    --mono:ui-monospace,"Cascadia Mono","Cascadia Code","SF Mono",Consolas,monospace;
+    --sans:ui-sans-serif,"Segoe UI",system-ui,-apple-system,sans-serif}
+  body{font:12px/1.4 var(--sans);color:var(--ink);
+    background:#141416;border:1px solid rgba(255,255,255,.10);border-radius:12px;
+    overflow:hidden;padding:clamp(9px,2.6vw,13px) clamp(10px,3vw,14px);
+    user-select:none;-webkit-user-select:none;cursor:default;
+    display:flex;flex-direction:column;gap:clamp(6px,1.6vh,10px)}
+  .top{display:flex;align-items:center;gap:7px;color:var(--faint);font:10px/1 var(--mono);flex:none}
+  .top .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex:none}
+  .top .ttl{text-transform:uppercase;letter-spacing:.4px;max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .top .tier{color:var(--ink);font:600 12.5px/1 var(--sans);letter-spacing:0;
+    max-width:52%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .top .verdict{margin-left:auto;font:700 11px/1 var(--sans);padding-right:6px;white-space:nowrap}
+  .top .x{cursor:pointer;color:var(--faint);font-size:15px;line-height:1;padding:0 3px}
+  .top .x:hover{color:var(--ink)}
+  #body{flex:1;display:flex;flex-direction:column;justify-content:center;gap:clamp(6px,1.8vh,11px);min-height:0}
+  .row{display:flex;align-items:center;gap:10px}
+  .lab{width:34px;color:var(--dim);font:600 11px/1 var(--mono);text-transform:uppercase}
+  .bar{flex:1;height:8px;border-radius:4px;background:rgba(255,255,255,.10);overflow:hidden}
+  .bar>i{display:block;height:100%;border-radius:4px;width:0;transition:width .7s cubic-bezier(.22,1,.36,1)}
+  .pc{width:44px;text-align:right;font:600 clamp(14px,4.2vw,16px)/1 var(--mono);font-variant-numeric:tabular-nums}
+  .cd{width:62px;text-align:right;color:var(--faint);font:10.5px/1 var(--mono);font-variant-numeric:tabular-nums}
+  .acts{display:flex;gap:6px;flex:none}
+  .btn{flex:1;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.10);color:var(--dim);
+    font:600 11px/1 var(--sans);padding:8px;border-radius:7px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .btn:hover{color:var(--ink);border-color:rgba(255,255,255,.22)}
+  .btn:active{transform:translateY(1px)} .btn:disabled{opacity:.7;cursor:default}
+  .err{color:#e9b3a6;font:11px/1 var(--mono);padding:6px 2px}
+  .grip{position:fixed;right:0;bottom:0;width:18px;height:18px;border:0;background:transparent;cursor:nwse-resize;padding:0}
+  .grip::after{content:"";position:absolute;right:3px;bottom:3px;width:8px;height:8px;
+    border-right:2px solid var(--faint);border-bottom:2px solid var(--faint)}
+  .grip:hover::after{border-color:var(--dim)}
 </style>
 </head>
 <body>
   <div class="top">
     <span class="dot" id="dot"></span><span class="ttl" id="acct">Claude usage</span>
-    <span class="tier" id="tier"></span><span class="verdict" id="verdict"></span><span class="x" onclick="refreshNow()" title="Re-check usage now">↻</span><span class="x" onclick="closeWidget()" title="Hide">×</span>
+    <span class="tier" id="tier"></span><span class="verdict" id="verdict"></span><span class="x" onclick="closeWidget()" title="Hide">×</span>
   </div>
   <div id="body">
     <div class="row"><span class="lab">5h</span><div class="bar"><i id="b5"></i></div><span class="pc" id="pc5">–</span><span class="cd" id="cd5"></span></div>
     <div class="row"><span class="lab">Week</span><div class="bar"><i id="b7"></i></div><span class="pc" id="pc7">–</span><span class="cd" id="cd7"></span></div>
     <div class="row"><span class="lab">Ctx</span><div class="bar"><i id="bc"></i></div><span class="pc" id="pcc">–</span><span class="cd" id="cdc"></span></div>
   </div>
+  <div class="acts">
+    <button class="btn" id="w-refresh" onclick="refreshNow()">Refresh</button>
+    <button class="btn" id="w-check" onclick="checkUpd()">Check for updates</button>
+  </div>
+  <button class="grip" id="grip" title="Drag to resize"></button>
 <script>
 const $=id=>document.getElementById(id);
 let R={};
 function bandColor(p){ if(p>=80)return"#d4694f"; if(p>=60)return"#cda24e"; return"#5e9e72"; }
 function fmtTok(n){ n=n||0; if(n>=1e6)return (n/1e6).toFixed(1)+"M"; if(n>=1e3)return Math.round(n/1e3)+"k"; return ""+n; }
 function closeWidget(){ try{ window.pywebview.api.close(); }catch(e){ try{window.close();}catch(_){} } }
-async function refreshNow(){ try{ await fetch("/api/refresh",{method:"POST"}); }catch(e){} setTimeout(refresh,500); }
+async function refreshNow(){ const b=$("w-refresh"); if(b){b.disabled=true;b.textContent="Refreshing…";}
+  try{ await fetch("/api/refresh",{method:"POST"}); }catch(e){}
+  setTimeout(()=>{ refresh(); if(b){b.disabled=false;b.textContent="Refresh";} },700); }
+async function checkUpd(){ const b=$("w-check"); if(!b)return; b.disabled=true; b.textContent="Checking…";
+  try{ const d=await (await fetch("/api/check-update",{method:"POST"})).json();
+    b.textContent=d.update?("v"+d.latest+" available"):(d.latest?"Up to date":"Check failed");
+  }catch(e){ b.textContent="Check failed"; }
+  setTimeout(()=>{ b.disabled=false; b.textContent="Check for updates"; },3500); }
 function sdur(s){ if(s==null)return""; s=Math.max(0,Math.floor(s));
   const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
   if(d>0)return"↻ "+d+"d "+h+"h"; if(h>0)return"↻ "+h+"h "+String(m).padStart(2,"0")+"m";
   if(m>0)return"↻ "+m+"m"; return"↻ "+(s%60)+"s"; }
 function tick(){const now=Date.now();for(const k in R){const el=$("cd"+k);if(el)el.textContent=R[k]?sdur((R[k]-now)/1000):"";}}
-function setRow(i,w){ const b=$("b"+i),pc=$("pc"+i); const black=w.color==="#0a0a0c";
-  if(b){b.style.width=Math.min(100,w.pct)+"%";b.style.background=w.color;
-    b.style.boxShadow=black?"inset 0 0 0 1.5px #f85149":"none";}
-  if(pc){pc.textContent=Math.round(w.pct)+"%";pc.style.color=black?"#e8eef6":w.color;}
+function setRow(i,w){ const b=$("b"+i),pc=$("pc"+i);
+  if(b){ b.style.width=Math.min(100,w.pct)+"%"; b.style.background=w.color; }
+  if(pc){ pc.textContent=Math.round(w.pct)+"%"; pc.style.color=w.color; }
   R[i]=w.resets_at; }
 async function refresh(){ try{
   const d=await (await fetch("/api/usage",{cache:"no-store"})).json();
   const wins=d.windows||[];
-  if(!d.ok && !wins.length){ $("dot").style.background="#f85149"; $("tier").textContent=(d.error||"unavailable"); return; }
-  $("dot").style.background=d.ok?"#3fb950":"#e3893a";
+  if(!d.ok && !wins.length){ $("dot").style.background="#d4694f"; $("tier").textContent=(d.error||"unavailable"); return; }
+  $("dot").style.background=d.ok?"#5e9e72":"#cda24e";
   const v=d.verdict;
   if(v && v.text){ $("verdict").textContent=v.text; $("verdict").style.color=v.color; if(d.ok)$("dot").style.background=v.color; }
   else { $("verdict").textContent=""; }
@@ -1941,7 +1967,16 @@ async function refresh(){ try{
     $("cdc").textContent=c.total_input_tokens?fmtTok(c.total_input_tokens):"";
   }
   tick();
-}catch(e){ $("dot").style.background="#e3893a"; } }
+}catch(e){ $("dot").style.background="#cda24e"; } }
+(function(){ const g=$("grip"); if(!g)return; let sx,sy,sw,sh,on=false;
+  g.addEventListener("pointerdown",e=>{ on=true; sx=e.screenX; sy=e.screenY; sw=window.innerWidth; sh=window.innerHeight;
+    try{g.setPointerCapture(e.pointerId);}catch(_){} e.preventDefault(); e.stopPropagation(); });
+  g.addEventListener("pointermove",e=>{ if(!on)return;
+    const W=Math.max(320,Math.round(sw+(e.screenX-sx))), H=Math.max(200,Math.round(sh+(e.screenY-sy)));
+    try{ window.pywebview.api.resize(W,H); }catch(_){} });
+  g.addEventListener("pointerup",e=>{ if(!on)return; on=false; try{g.releasePointerCapture(e.pointerId);}catch(_){}
+    try{ window.pywebview.api.save_size(window.innerWidth,window.innerHeight); }catch(_){} });
+})();
 setInterval(tick,1000); setInterval(refresh,5000); refresh();
 </script>
 </body>
@@ -2164,8 +2199,8 @@ def run_widget(port: int) -> int:
         ensure_app_icon()
         set_app_user_model_id()
 
-        w = int(cfg.get("widget_width", 392))
-        h = int(cfg.get("widget_height", 150))
+        w = max(int(cfg.get("widget_width", 392)), 320)
+        h = max(int(cfg.get("widget_height", 216)), 200)   # floor: keep all content visible
         pos = {}
         try:    # top-right corner with a small margin
             import ctypes
@@ -2182,9 +2217,23 @@ def run_widget(port: int) -> int:
                     except Exception:
                         pass
 
-        webview.create_window(APP_NAME, url, width=w, height=h, resizable=False,
-                              frameless=True, easy_drag=True, on_top=True,
-                              background_color="#0e1422", js_api=Api(), **pos)
+            def resize(self, w, h):     # called by the corner grip (frameless has no OS edges)
+                try:
+                    webview.windows[0].resize(int(w), int(h))
+                except Exception:
+                    pass
+
+            def save_size(self, w, h):  # remember the chosen size for next launch
+                try:
+                    c = load_config()
+                    c["widget_width"], c["widget_height"] = max(320, int(w)), max(200, int(h))
+                    save_json(CONFIG_PATH, c)
+                except Exception:
+                    pass
+
+        webview.create_window(APP_NAME, url, width=w, height=h, resizable=True,
+                              min_size=(320, 200), frameless=True, easy_drag=True, on_top=True,
+                              background_color="#141416", js_api=Api(), **pos)
         threading.Thread(target=_apply_window_icon, args=(True,), daemon=True).start()
         webview.start(icon=str(ICO_PATH))
     except Exception as exc:
