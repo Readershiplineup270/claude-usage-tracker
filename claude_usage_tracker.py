@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.22"
+__version__ = "0.1.23"
 
 
 def _data_dir() -> Path:
@@ -1484,6 +1484,19 @@ DASHBOARD_HTML = r"""<!doctype html>
   .linkbtn{background:none;border:0;color:var(--accent);font:inherit;cursor:pointer;padding:0}
   .linkbtn:hover{text-decoration:underline}
   footer a{color:var(--accent)}
+  /* settings tab */
+  .setrow{display:flex;align-items:center;gap:12px;margin:13px 0;font-size:13px;flex-wrap:wrap}
+  .setlbl{width:96px;color:var(--ink);font-weight:600}
+  .sbtn{background:var(--panel2);border:1px solid var(--line);color:var(--ink);font:600 12px/1 var(--sans);
+    padding:8px 14px;border-radius:7px;cursor:pointer}
+  .sbtn:hover{border-color:rgba(255,255,255,.22)} .sbtn:active{transform:translateY(1px)}
+  .sbtn.on{background:var(--accent);color:#1c0f08;border-color:transparent}
+  .chk{display:inline-flex;align-items:center;gap:6px;color:var(--dim);font-size:12.5px;cursor:pointer}
+  .chk input,.fields input{accent-color:var(--accent)}
+  .fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}
+  .fields label{display:inline-flex;align-items:center;gap:8px;color:var(--ink);font-size:13px;cursor:pointer;
+    background:var(--bg);border:1px solid var(--line2);border-radius:8px;padding:9px 11px}
+  .setacts{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 </style>
 </head>
 <body>
@@ -1506,6 +1519,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   <div class="tabs">
     <button class="tab on" data-t="live">Live</button>
     <button class="tab" data-t="alltime">All-time</button>
+    <button class="tab" data-t="settings">Settings</button>
   </div>
 
   <div id="tab-live" class="tabpane">
@@ -1613,6 +1627,30 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="card panel">
         <div class="ptitle">By model</div>
         <div id="at-models"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-settings" class="tabpane" hidden>
+    <div class="card panel">
+      <div class="ptitle">Overlays</div>
+      <div class="setrow"><span class="setlbl">Minimal bar</span>
+        <button class="sbtn" id="set-toggle-bar">Show</button>
+        <label class="chk"><input type="checkbox" id="set-bar-start"> open at startup</label></div>
+      <div class="setrow"><span class="setlbl">Widget</span>
+        <button class="sbtn" id="set-toggle-widget">Show</button>
+        <label class="chk"><input type="checkbox" id="set-widget-start"> open at startup</label></div>
+    </div>
+    <div class="card panel">
+      <div class="ptitle">Minimal bar — fields shown</div>
+      <div id="set-fields" class="fields"></div>
+    </div>
+    <div class="card panel">
+      <div class="ptitle">Actions</div>
+      <div class="setacts">
+        <button class="sbtn" id="set-refresh">Refresh now</button>
+        <button class="sbtn" id="set-check">Check for updates</button>
+        <button class="sbtn" id="set-login">Sign in to Claude</button>
       </div>
     </div>
   </div>
@@ -1829,6 +1867,29 @@ function renderSeries(bins){
   const lbl=(x,txt,anc)=>{const e=document.createElementNS(ns,"text");e.setAttribute("x",x);e.setAttribute("y",H-5);e.setAttribute("fill","#6c6b66");e.setAttribute("font-family","ui-monospace,Consolas,monospace");e.setAttribute("font-size","9");if(anc)e.setAttribute("text-anchor",anc);e.textContent=txt;svg.appendChild(e);};
   lbl(4,bins[0].label,"start"); if(n>1)lbl(W-4,bins[n-1].label,"end");
 }
+let LASTD={};
+const BARFIELDS=[["dir","Directory"],["acct","Account"],["ctx","Context %"],["5h","5-hour %"],["7d","Weekly %"],["verdict","Verdict"]];
+async function postCfg(patch){ try{ await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)}); }catch(e){} }
+async function postOverlay(id){ try{ await fetch("/api/overlay",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})}); }catch(e){} }
+function syncOverlayLabels(){
+  const a=LASTD.overlays_alive||{};
+  const b=$("set-toggle-bar"), w=$("set-toggle-widget");
+  if(b){ b.textContent=a.bar?"Hide":"Show"; b.classList.toggle("on",!!a.bar); }
+  if(w){ w.textContent=a.widget?"Hide":"Show"; w.classList.toggle("on",!!a.widget); }
+}
+function renderSettings(){
+  const ui=LASTD.ui||{};
+  $("set-bar-start").checked=!!ui.show_bar_on_start;
+  $("set-widget-start").checked=ui.show_widget_on_start!==false;
+  const cur=(ui.bar_fields&&ui.bar_fields.length)?ui.bar_fields:["dir","ctx","5h","7d"];
+  $("set-fields").innerHTML=BARFIELDS.map(f=>
+    "<label><input type='checkbox' data-f='"+f[0]+"'"+(cur.indexOf(f[0])>=0?" checked":"")+"> "+f[1]+"</label>").join("");
+  $("set-fields").querySelectorAll("input").forEach(c=>c.addEventListener("change",()=>{
+    const picked=BARFIELDS.map(f=>f[0]).filter(k=>$("set-fields").querySelector("input[data-f='"+k+"']").checked);
+    postCfg({bar_fields:picked.length?picked:["dir"]});
+  }));
+  syncOverlayLabels();
+}
 function renderAlltime(a){
   if(a)AT=a;
   if(!AT||!AT.ready)return;                       // keep the "calculating…" placeholder
@@ -1848,6 +1909,7 @@ function renderAlltime(a){
 async function refresh(){
   try{
     const d=await (await fetch("/api/usage",{cache:"no-store"})).json();
+    LASTD=d;
     const wins=d.windows||[];
     const authBad=d.token_state==="expired"||d.token_state==="missing";
     const err=$("err");
@@ -1911,9 +1973,15 @@ document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{
   document.querySelectorAll(".tab").forEach(x=>x.classList.remove("on"));
   b.classList.add("on");
   const t=b.dataset.t;
-  $("tab-live").hidden=(t!=="live"); $("tab-alltime").hidden=(t!=="alltime");
+  $("tab-live").hidden=(t!=="live"); $("tab-alltime").hidden=(t!=="alltime"); $("tab-settings").hidden=(t!=="settings");
   if(t==="alltime")renderAlltime();   // (re)draw now that the pane has layout
+  if(t==="settings")renderSettings();
 }));
+$("set-toggle-bar").onclick=function(){ const sh=this.textContent==="Hide"; this.textContent=sh?"Show":"Hide"; this.classList.toggle("on",!sh); postOverlay("bar"); };
+$("set-toggle-widget").onclick=function(){ const sh=this.textContent==="Hide"; this.textContent=sh?"Show":"Hide"; this.classList.toggle("on",!sh); postOverlay("widget"); };
+$("set-bar-start").onchange=function(){ postCfg({show_bar_on_start:this.checked}); };
+$("set-widget-start").onchange=function(){ postCfg({show_widget_on_start:this.checked}); };
+$("set-refresh").onclick=doRefresh; $("set-check").onclick=doCheckUpdate; $("set-login").onclick=doSignin;
 </script>
 </body>
 </html>"""
@@ -2084,6 +2152,11 @@ async function refresh(){ try{
 }catch(e){ if(KIND!=="bar"){ $("dot").style.background="#cda24e"; } } }
 // Resize is handled natively by the OS (WS_THICKFRAME) — no JS resize math (DPI-safe).
 $("tier").addEventListener("change",function(){ SEL=this.value; try{localStorage.setItem("trackSel",SEL);}catch(_){} refresh(); });
+// Don't let pywebview's easy_drag move the window when interacting with a control
+// (its drag listener is on window/bubble — stop the event before it reaches it).
+document.addEventListener("mousedown",function(e){
+  if(e.target.closest("select,button,input,a,.x,.ic")) e.stopPropagation();
+},false);
 setInterval(tick,1000); setInterval(refresh,5000); refresh();
 </script>
 </body>
