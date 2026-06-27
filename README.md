@@ -52,6 +52,10 @@ talks to nothing but that one Anthropic endpoint.
 - **20% notifications** — a Windows toast each time the 5h or weekly window crosses
   20 / 40 / 60 / 80 / 100%. The first reading is recorded silently, so you only get
   pinged on *future* crossings, never a burst at startup.
+- **One-click sign-in** — when your login expires, a **Sign in to Claude** action (in
+  the tray menu and on the dashboard banner) runs `claude auth login` — Claude Code's
+  own sign-in — so you can refresh it without opening a terminal. The app never writes
+  your credentials itself; it just triggers Claude Code's flow.
 - **Auto-start on login**, single-instance, graceful rate-limit (HTTP 429) back-off,
   and automatic pickup of account/token changes (it re-reads your login each poll).
 
