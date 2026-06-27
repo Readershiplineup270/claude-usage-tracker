@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.21"
+__version__ = "0.1.22"
 
 
 def _data_dir() -> Path:
@@ -100,6 +100,7 @@ DEFAULT_CONFIG = {
     "alltime_top_n": 8,                  # projects shown on the All-time tab
     "alltime_days": 30,                  # span of the daily-usage chart
     "predictive_alerts": True,           # burn-rate / context-full / overage toasts
+    "danger_alerts": True,               # loud per-percent warnings in the 95-100% zone
     "update_check": True,                # daily check for a newer version on PyPI
     "threshold_step": 20,            # ping every N percent
     "windows": ["five_hour", "seven_day"],
@@ -1025,7 +1026,9 @@ VERDICTS = {
     "ok": ("#5e9e72", "All clear"),
     "caution": ("#cda24e", "Ease up"),
     "stop": ("#d4694f", "Near limit"),
+    "over": ("#c94f38", "At limit"),
 }
+_VERDICT_ORDER = ("ok", "caution", "stop", "over")
 
 
 def compute_verdict(windows) -> dict:
@@ -1035,10 +1038,16 @@ def compute_verdict(windows) -> dict:
         if w.get("key") not in ("five_hour", "seven_day"):
             continue
         pct, eta = w.get("pct", 0), w.get("eta_seconds")
-        if pct >= 95:
-            level = "stop"
-        elif (pct >= 80 or eta is not None) and level != "stop":
-            level = "caution"
+        if pct >= 100:
+            l = "over"
+        elif pct >= 95:
+            l = "stop"
+        elif pct >= 80 or eta is not None:
+            l = "caution"
+        else:
+            l = "ok"
+        if _VERDICT_ORDER.index(l) > _VERDICT_ORDER.index(level):
+            level = l
     color, text = VERDICTS[level]
     return {"level": level, "color": color, "text": text}
 
@@ -1198,10 +1207,10 @@ def ensure_app_icon() -> None:
 # Notifications
 # ---------------------------------------------------------------------------
 
-def notify(title: str, msg: str) -> None:
+def notify(title: str, msg: str, duration: str = "short") -> None:
     try:
         from winotify import Notification, audio
-        kwargs = {"app_id": APP_NAME, "title": title, "msg": msg}
+        kwargs = {"app_id": APP_NAME, "title": title, "msg": msg, "duration": duration}
         if ICON_PATH.exists():
             kwargs["icon"] = str(ICON_PATH)
         toast = Notification(**kwargs)
@@ -1245,6 +1254,34 @@ def check_thresholds(windows: dict, state: dict, cfg: dict) -> None:
             state[key] = {"bucket": cur_bucket, "resets_at": reset_iso}
         else:
             state[key]["resets_at"] = reset_iso
+
+
+def check_danger(windows: dict, state: dict, cfg: dict) -> None:
+    """Loud warning at each percent in the danger zone (95-100%), once each per reset
+    period, for the 5h and weekly windows. Uses a persisted high-water mark so it never
+    re-fires or fires on the way down."""
+    if not cfg.get("danger_alerts", True):
+        return
+    d = state.setdefault("_danger", {})
+    for key in ("five_hour", "seven_day"):
+        if key not in windows:
+            continue
+        w = windows[key]
+        pct = w["pct"]
+        reset_iso = w["resets_at"].isoformat() if w["resets_at"] else None
+        rec = d.get(key)
+        if not rec or rec.get("resets_at") != reset_iso:
+            rec = d[key] = {"resets_at": reset_iso, "max": 0}
+        p = min(int(pct), 100)
+        if p >= 95 and p > rec["max"]:
+            rec["max"] = p
+            label = LABELS.get(key, key)
+            if p >= 100:
+                notify(f"\U0001F6A8 Claude {label} is at 100%",
+                       f"Limit reached · resets {fmt_reset(w['resets_at'])}", duration="long")
+            else:
+                notify(f"⚠️ Claude {label} at {p}%",
+                       f"Almost out — {pct:.0f}% used · resets {fmt_reset(w['resets_at'])}", duration="long")
 
 
 def check_alerts(snap: dict, state: dict, cfg: dict) -> None:
@@ -1929,7 +1966,7 @@ WIDGET_HTML = r"""<!doctype html>
   .err{color:#e9b3a6;font:11px/1 var(--mono);padding:6px 2px}
   /* ---- minimal "bar" kind (FPS-overlay style) ---- */
   body.kind-bar{flex-direction:row;align-items:center;gap:0;padding:5px 11px;
-    background:rgba(18,18,20,.85);border:1px solid rgba(255,255,255,.08);border-radius:9px}
+    background:#0e0e10;border:1px solid rgba(255,255,255,.10);border-radius:9px}
   body.kind-bar .top,body.kind-bar #body,body.kind-bar .acts{display:none}
   #bar{display:none}
   body.kind-bar #bar{display:flex;align-items:center;gap:14px;width:100%;overflow:hidden;
@@ -2004,8 +2041,6 @@ function bfld(label,pct){ return pct==null?"":"<span class='f'>"+label+" <b styl
 function refreshNow2(){ fetch("/api/refresh",{method:"POST"}).catch(()=>{}); setTimeout(refresh,500); }
 function renderBar(d){           // minimal one-line HUD (configurable fields, in order)
   const wins=d.windows||[], ui=d.ui||{};
-  const op=Math.max(30,Math.min(100, ui.bar_opacity!=null?ui.bar_opacity:85))/100;
-  document.body.style.background="rgba(18,18,20,"+op.toFixed(2)+")";   // consistent dark, adjustable
   if(!d.ok && !wins.length){ $("bar").innerHTML="<span class='f dir'>"+esc(d.error||"unavailable")+"</span>"; return; }
   const cx=curContext(d), dir=SEL||actDir(d), acc=d.account||{}, v=d.verdict;
   const fields=(ui.bar_fields&&ui.bar_fields.length)?ui.bar_fields:["dir","ctx","5h","7d"];
@@ -2363,10 +2398,7 @@ def run_overlay(port: int, kind: str = "panel") -> int:
         api = Api()
         kw = dict(width=w, height=h, resizable=True, min_size=minsz,
                   frameless=True, easy_drag=True, on_top=True, js_api=api, **pos)
-        if bar:
-            kw["transparent"] = True            # see-through HUD; CSS paints a translucent panel
-        else:
-            kw["background_color"] = "#141416"
+        kw["background_color"] = "#0e0e10" if bar else "#141416"   # solid, opaque (no grey bleed)
         window = webview.create_window(APP_NAME, url, **kw)
         # native resize (WS_THICKFRAME) doesn't call JS — persist the size from the resized event
         _rt = {"t": None}
@@ -2939,6 +2971,7 @@ class TrayApp:
                     append_history(self.history, r.windows, now, cap)
                     save_json(HISTORY_PATH, self.history)
                     check_thresholds(r.windows, self.state, self.cfg)
+                    check_danger(r.windows, self.state, self.cfg)
                     save_json(STATE_PATH, self.state)
                     warned_token = False
                     log(f"ok ({src}): {status_line(r.windows)}")

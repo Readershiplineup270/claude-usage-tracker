@@ -71,6 +71,30 @@ def test_compute_verdict():
     assert m.compute_verdict([{"key": "five_hour", "pct": 85}])["level"] == "caution"
     assert m.compute_verdict([{"key": "seven_day", "pct": 97}])["level"] == "stop"
     assert m.compute_verdict([{"key": "five_hour", "pct": 10, "eta_seconds": 3000}])["level"] == "caution"
+    v = m.compute_verdict([{"key": "five_hour", "pct": 100}])
+    assert v["level"] == "over" and v["text"] == "At limit"          # 100% is no longer "Near limit"
+    assert m.compute_verdict([{"key": "five_hour", "pct": 100},
+                              {"key": "seven_day", "pct": 30}])["level"] == "over"
+
+
+def test_check_danger(monkeypatch):
+    from datetime import datetime, timezone
+    fired = []
+    monkeypatch.setattr(m, "notify", lambda *a, **k: fired.append(a[0]))
+    reset = datetime(2026, 6, 27, 23, 59, tzinfo=timezone.utc)
+    state, cfg = {}, {"danger_alerts": True}
+
+    def win(pct):
+        return {"five_hour": {"pct": pct, "resets_at": reset}}
+
+    m.check_danger(win(90), state, cfg);  assert not fired          # below the zone -> silent
+    m.check_danger(win(95), state, cfg);  assert len(fired) == 1    # crossing into 95
+    m.check_danger(win(95), state, cfg);  assert len(fired) == 1    # same percent -> no repeat
+    m.check_danger(win(94), state, cfg);  assert len(fired) == 1    # dropping -> no fire
+    m.check_danger(win(98), state, cfg);  assert len(fired) == 2    # new high -> one fire (no backfill spam)
+    m.check_danger(win(100), state, cfg); assert len(fired) == 3 and "100%" in fired[-1]
+    m.check_danger(win(99), {}, {"danger_alerts": False})           # disabled -> silent (fresh state)
+    assert len(fired) == 3
 
 
 def test_vtuple():
