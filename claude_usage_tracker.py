@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.15"
+__version__ = "0.1.16"
 
 
 def _data_dir() -> Path:
@@ -1446,7 +1446,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="badge" id="tier">—</div>
     <div class="vpill" id="vpill"></div>
     <div class="live"><span class="dot" id="livedot"></span><span id="livetxt">live</span></div>
-    <a class="updcta" id="updcta" target="_blank" rel="noopener" hidden></a>
+    <button class="updcta" id="updcta" hidden></button>
     <button class="ic" id="btn-refresh" title="Re-check usage now">↻</button>
   </header>
 
@@ -1591,11 +1591,16 @@ async function doRefresh(){
   try{ await fetch("/api/refresh",{method:"POST"}); }catch(e){}
   setTimeout(refresh,500);   // give the poll loop a beat, then pull the fresh snapshot
 }
+async function doUpdate(){
+  const c=$("updcta"); if(c){ c.disabled=true; c.textContent="Updating…"; }
+  const r=$("updres"); if(r)r.textContent="updating — the app will restart…";
+  try{ await fetch("/api/update",{method:"POST"}); }catch(e){}
+}
 async function doCheckUpdate(){
   const r=$("updres"); if(r)r.textContent="checking…";
   try{
     const d=await (await fetch("/api/check-update",{method:"POST"})).json();
-    if(d.update){ r.innerHTML="v"+d.latest+" available — <a href='"+REL+"' target='_blank' rel='noopener'>download</a>"; }
+    if(d.update){ r.innerHTML="v"+d.latest+" available — <button class='linkbtn' onclick='doUpdate()'>update now</button>"; }
     else if(d.latest){ r.textContent="up to date (v"+d.current+")"; }
     else{ r.textContent="couldn't reach GitHub"; }
   }catch(e){ if(r)r.textContent="couldn't reach GitHub"; }
@@ -1826,13 +1831,14 @@ async function refresh(){
     renderSessions(d.sessions);
     renderAlltime(d.alltime);
     const up=d.update||{}, cta=$("updcta");
-    if(cta){ if(up.available){ cta.hidden=false; cta.textContent="Update to v"+up.available; cta.href=up.url||REL; } else { cta.hidden=true; } }
+    if(cta){ if(up.available){ cta.hidden=false; if(!cta.disabled)cta.textContent="Update to v"+up.available; } else { cta.hidden=true; } }
     tickCountdowns();
   }catch(e){ $("err").className="err show"; $("err").textContent="⚠ cannot reach the tracker service."; }
 }
 buildTicks();
 $("btn-refresh").onclick=doRefresh;
 $("btn-checkupd").onclick=doCheckUpdate;
+$("updcta").onclick=doUpdate;
 setInterval(tickCountdowns,1000);
 setInterval(refresh,5000);
 refresh();
@@ -1884,6 +1890,12 @@ WIDGET_HTML = r"""<!doctype html>
   .top .ttl{text-transform:uppercase;letter-spacing:.4px;max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .top .tier{color:var(--ink);font:600 12.5px/1 var(--sans);letter-spacing:0;
     max-width:52%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  select.tier{appearance:none;-webkit-appearance:none;border:0;background-color:transparent;cursor:pointer;
+    padding:2px 15px 2px 5px;border-radius:5px;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6' fill='none' stroke='%239b9a95' stroke-width='1.4'%3E%3Cpath d='M1 1l4 4 4-4'/%3E%3C/svg%3E");
+    background-repeat:no-repeat;background-position:right 3px center}
+  select.tier:hover{background-color:rgba(255,255,255,.06)}
+  select.tier option{background:#1d1d20;color:var(--ink);font-weight:500}
   .top .verdict{margin-left:auto;font:700 11px/1 var(--sans);padding-right:6px;white-space:nowrap}
   .top .x{cursor:pointer;color:var(--faint);font-size:15px;line-height:1;padding:0 3px}
   .top .x:hover{color:var(--ink)}
@@ -1909,7 +1921,7 @@ WIDGET_HTML = r"""<!doctype html>
 <body>
   <div class="top">
     <span class="dot" id="dot"></span><span class="ttl" id="acct">Claude usage</span>
-    <span class="tier" id="tier"></span><span class="verdict" id="verdict"></span><span class="x" onclick="closeWidget()" title="Hide">×</span>
+    <select class="tier" id="tier" title="Track a session"></select><span class="verdict" id="verdict"></span><span class="x" onclick="closeWidget()" title="Hide">×</span>
   </div>
   <div id="body">
     <div class="row"><span class="lab">5h</span><div class="bar"><i id="b5"></i></div><span class="pc" id="pc5">–</span><span class="cd" id="cd5"></span></div>
@@ -1924,6 +1936,8 @@ WIDGET_HTML = r"""<!doctype html>
 <script>
 const $=id=>document.getElementById(id);
 let R={};
+let SEL=""; try{ SEL=localStorage.getItem("trackSel")||""; }catch(_){}
+function esc(s){ return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function bandColor(p){ if(p>=80)return"#d4694f"; if(p>=60)return"#cda24e"; return"#5e9e72"; }
 function fmtTok(n){ n=n||0; if(n>=1e6)return (n/1e6).toFixed(1)+"M"; if(n>=1e3)return Math.round(n/1e3)+"k"; return ""+n; }
 function closeWidget(){ try{ window.pywebview.api.close(); }catch(e){ try{window.close();}catch(_){} } }
@@ -1944,10 +1958,24 @@ function setRow(i,w){ const b=$("b"+i),pc=$("pc"+i);
   if(b){ b.style.width=Math.min(100,w.pct)+"%"; b.style.background=w.color; }
   if(pc){ pc.textContent=Math.round(w.pct)+"%"; pc.style.color=w.color; }
   R[i]=w.resets_at; }
+function actDir(d){ return (d.cwd||"").replace(/[\\\/]+$/,"").split(/[\\\/]/).pop()||"active"; }
+function buildOpts(d){          // populate the session picker; "" = follow the active terminal
+  const sel=$("tier"), sessions=d.sessions||[];
+  const sig=(d.cwd||"")+"|"+sessions.map(s=>s.name).join(",");
+  if(sel._sig===sig)return; sel._sig=sig;
+  let html="<option value=''>"+esc(actDir(d))+" · active</option>";
+  sessions.forEach(s=>{ if(s.name) html+="<option value=\""+esc(s.name)+"\">"+esc(s.name)+"</option>"; });
+  sel.innerHTML=html; sel.value=SEL;
+  if(sel.value!==SEL){ SEL=""; sel.value=""; }   // pinned session aged out -> back to active
+}
+function curContext(d){         // context for the selected session, or the active terminal
+  if(SEL){ const s=(d.sessions||[]).find(x=>x.name===SEL); if(s) return {pct:s.context_pct, tok:s.context_tokens}; }
+  const c=d.context||{}; return {pct:(c.used_percentage!=null?c.used_percentage:null), tok:c.total_input_tokens};
+}
 async function refresh(){ try{
   const d=await (await fetch("/api/usage",{cache:"no-store"})).json();
   const wins=d.windows||[];
-  if(!d.ok && !wins.length){ $("dot").style.background="#d4694f"; $("tier").textContent=(d.error||"unavailable"); return; }
+  if(!d.ok && !wins.length){ $("dot").style.background="#d4694f"; $("verdict").textContent=(d.error||"unavailable"); $("verdict").style.color="#d4694f"; return; }
   $("dot").style.background=d.ok?"#5e9e72":"#cda24e";
   const v=d.verdict;
   if(v && v.text){ $("verdict").textContent=v.text; $("verdict").style.color=v.color; if(d.ok)$("dot").style.background=v.color; }
@@ -1955,28 +1983,29 @@ async function refresh(){ try{
   const acc=d.account||{};
   $("acct").textContent = acc.org || acc.name || (acc.email||"").split("@")[0] || "Claude";
   $("acct").title = acc.email || "";
-  const dir=(d.cwd||"").replace(/[\\\/]+$/,"").split(/[\\\/]/).pop();
-  $("tier").textContent = dir || d.subscription || "";
-  $("tier").title = d.cwd || "";
+  buildOpts(d);
+  $("tier").title = SEL || d.cwd || "";
   wins.forEach(w=>{ if(w.key==="five_hour")setRow("5",w); if(w.key==="seven_day")setRow("7",w); });
-  const c=d.context;
-  if(c && c.used_percentage!=null){
-    const p=c.used_percentage, col=bandColor(p), bk=p>=90;
+  const cx=curContext(d);
+  if(cx.pct!=null){
+    const p=cx.pct, col=bandColor(p);
     $("bc").style.width=Math.min(100,p)+"%"; $("bc").style.background=col;
     $("pcc").textContent=Math.round(p)+"%"; $("pcc").style.color=col;
-    $("cdc").textContent=c.total_input_tokens?fmtTok(c.total_input_tokens):"";
-  }
+    $("cdc").textContent=cx.tok?fmtTok(cx.tok):"";
+  } else { $("bc").style.width="0%"; $("pcc").textContent="–"; $("pcc").style.color=""; $("cdc").textContent=""; }
   tick();
 }catch(e){ $("dot").style.background="#cda24e"; } }
 (function(){ const g=$("grip"); if(!g)return; let sx,sy,sw,sh,on=false;
+  g.addEventListener("mousedown",e=>{ e.stopPropagation(); e.preventDefault(); });  // don't let easy_drag move the window
   g.addEventListener("pointerdown",e=>{ on=true; sx=e.screenX; sy=e.screenY; sw=window.innerWidth; sh=window.innerHeight;
     try{g.setPointerCapture(e.pointerId);}catch(_){} e.preventDefault(); e.stopPropagation(); });
   g.addEventListener("pointermove",e=>{ if(!on)return;
-    const W=Math.max(320,Math.round(sw+(e.screenX-sx))), H=Math.max(200,Math.round(sh+(e.screenY-sy)));
+    const W=Math.max(280,Math.round(sw+(e.screenX-sx))), H=Math.max(150,Math.round(sh+(e.screenY-sy)));
     try{ window.pywebview.api.resize(W,H); }catch(_){} });
   g.addEventListener("pointerup",e=>{ if(!on)return; on=false; try{g.releasePointerCapture(e.pointerId);}catch(_){}
     try{ window.pywebview.api.save_size(window.innerWidth,window.innerHeight); }catch(_){} });
 })();
+$("tier").addEventListener("change",function(){ SEL=this.value; try{localStorage.setItem("trackSel",SEL);}catch(_){} refresh(); });
 setInterval(tick,1000); setInterval(refresh,5000); refresh();
 </script>
 </body>
@@ -2025,8 +2054,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/login":
             threading.Thread(target=launch_login, daemon=True).start()
             self._send(200, "application/json", b'{"ok":true}')
-        elif path == "/api/refresh":
-            fn = CONTROL.get("refresh")
+        elif path in ("/api/refresh", "/api/update"):
+            fn = CONTROL.get("refresh" if path == "/api/refresh" else "update")
             if fn:
                 try:
                     fn()
@@ -2199,8 +2228,8 @@ def run_widget(port: int) -> int:
         ensure_app_icon()
         set_app_user_model_id()
 
-        w = max(int(cfg.get("widget_width", 392)), 320)
-        h = max(int(cfg.get("widget_height", 216)), 200)   # floor: keep all content visible
+        w = max(int(cfg.get("widget_width", 392)), 280)
+        h = max(int(cfg.get("widget_height", 216)), 150)   # floor: keep all content visible
         pos = {}
         try:    # top-right corner with a small margin
             import ctypes
@@ -2226,13 +2255,13 @@ def run_widget(port: int) -> int:
             def save_size(self, w, h):  # remember the chosen size for next launch
                 try:
                     c = load_config()
-                    c["widget_width"], c["widget_height"] = max(320, int(w)), max(200, int(h))
+                    c["widget_width"], c["widget_height"] = max(280, int(w)), max(150, int(h))
                     save_json(CONFIG_PATH, c)
                 except Exception:
                     pass
 
         webview.create_window(APP_NAME, url, width=w, height=h, resizable=True,
-                              min_size=(320, 200), frameless=True, easy_drag=True, on_top=True,
+                              min_size=(280, 150), frameless=True, easy_drag=True, on_top=True,
                               background_color="#141416", js_api=Api(), **pos)
         threading.Thread(target=_apply_window_icon, args=(True,), daemon=True).start()
         webview.start(icon=str(ICO_PATH))
@@ -2260,6 +2289,25 @@ def _launch_target():
     if gui and gui.lower().endswith(".exe"):
         return gui, ""
     return _pythonw(), f'"{Path(__file__).resolve()}"'
+
+
+def _is_installed_pkg() -> bool:
+    """True if running as an installed package (pipx/pip venv → site-packages), not a
+    source checkout. Source checkouts are git-managed and can't be pip-upgraded."""
+    if getattr(sys, "frozen", False):
+        return False
+    return "/site-packages/" in str(Path(__file__).resolve()).replace("\\", "/").lower()
+
+
+def _find_pipx():
+    import shutil
+    p = shutil.which("pipx")
+    if p:
+        return p
+    for c in (Path.home() / ".local" / "bin" / "pipx.exe", Path.home() / ".local" / "bin" / "pipx"):
+        if c.exists():
+            return str(c)
+    return None
 
 
 def _claude_cli():
@@ -2442,6 +2490,7 @@ class TrayApp:
         self._job = make_kill_on_close_job()
         CONTROL["refresh"] = self._wake.set            # let the dashboard/widget re-poll
         CONTROL["check_update"] = self._check_update_now
+        CONTROL["update"] = lambda: threading.Thread(target=self._do_update, daemon=True).start()
         threading.Thread(target=self._poll_loop, daemon=True).start()
         if self.cfg.get("show_widget_on_start", True):
             self.widget_proc = self._spawn_mode("--widget")
@@ -2508,8 +2557,51 @@ class TrayApp:
                 notify("Update failed", "Opening the download page…")
                 webbrowser.open(RELEASES_URL)
         else:
+            self._pip_self_update()
+
+    def _pip_self_update(self):
+        """Upgrade an installed (pipx/pip) copy in place using our OWN interpreter —
+        no reliance on a `pipx` command being on PATH — then relaunch. Source checkouts
+        are git-managed, so we just point those at the releases page."""
+        if not _is_installed_pkg():
             webbrowser.open(RELEASES_URL)
-            notify("Update", "Run: pipx upgrade claude-usage-tracker  (then relaunch)")
+            notify("Update", "Running from source — `git pull` to update (or install via pipx / Setup.exe).")
+            return
+        notify(APP_NAME, f"Updating to v{self._update_available}…")
+        NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            # sys.executable is the app's venv python (works for pipx and pip installs).
+            r = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "claude-usage-tracker"],
+                               capture_output=True, text=True, timeout=300, creationflags=NO_WIN)
+            ok = r.returncode == 0
+            if not ok:                              # fall back to a pipx binary if we can find one
+                pipx = _find_pipx()
+                if pipx:
+                    r = subprocess.run([pipx, "upgrade", "claude-usage-tracker"],
+                                       capture_output=True, text=True, timeout=300, creationflags=NO_WIN)
+                    ok = r.returncode == 0
+            if ok:
+                notify(APP_NAME, f"Updated to v{self._update_available} — restarting…")
+                self._relaunch_detached()
+                self._on_quit(self.icon, None)
+            else:
+                log("self-update failed:\n" + (r.stdout or "") + "\n" + (r.stderr or ""))
+                webbrowser.open(RELEASES_URL)
+                notify("Update failed", "Couldn't upgrade automatically — opened the releases page.")
+        except Exception as exc:
+            log(f"self-update error: {exc}")
+            webbrowser.open(RELEASES_URL)
+            notify("Update failed", "Couldn't upgrade automatically — opened the releases page.")
+
+    def _relaunch_detached(self, delay=2):
+        """Start a fresh instance after this one releases the single-instance port."""
+        try:
+            target, args = _launch_target()
+            cmd = f'ping 127.0.0.1 -n {delay + 1} >nul & start "" "{target}" {args}'
+            subprocess.Popen(cmd, shell=True, close_fds=True,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception as exc:
+            log(f"relaunch failed: {exc}")
 
     def _on_refresh(self, icon, item):
         self._wake.set()

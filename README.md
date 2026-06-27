@@ -29,9 +29,9 @@ talks to nothing but that one Anthropic endpoint.
 ## Features
 
 - **Always-on-top mini widget** — a frameless, draggable, **resizable** strip (5h,
-  weekly, and the active terminal's **context %**) that stays on top, with **Refresh**
-  and **Check for updates** buttons. Drag the corner to resize; the size is remembered.
-  Toggle it from the tray.
+  weekly, and **context %**) that stays on top, with **Refresh** and **Check for updates**
+  buttons. A **dropdown** picks which session/project's context to track (or follow the
+  active terminal). Drag the corner to resize; the size is remembered. Toggle it from the tray.
 - **Full dashboard** — animated ring gauges, live reset countdowns, a **burn-rate /
   time-to-limit projection** ("≈7%/h · hits 100% in ~1h 10m"), a usage history
   sparkline, overage credits, and per-model (Opus/Sonnet) scoped weekly limits.
@@ -49,9 +49,11 @@ talks to nothing but that one Anthropic endpoint.
 - **Proactive alerts + traffic-light verdict** — toasts when a window is on track to
   run out *before* it resets, when the active context hits 90% (time to `/compact`),
   or when overage credits near the cap; plus a one-glance **green / amber / red**
-  verdict in the widget and dashboard, and a daily update check with a one-click in-app
-  **Update** (the `.exe` self-updates; pipx installs use `pipx upgrade`). **Refresh** and
-  **Check for updates** are also one click away in the dashboard, widget, and tray menu.
+  verdict in the widget and dashboard, and a daily update check with a **one-click in-app
+  Update** that upgrades in place and restarts — the `.exe` runs the signed installer,
+  and pip/pipx installs upgrade themselves via the app's own Python (no `pipx` on PATH
+  needed, no trip to GitHub). **Refresh** and **Check for updates** are one click away in
+  the dashboard, widget, and tray menu too.
 - **Live tray icon** — two bars (left = 5h, right = weekly) that fill and change
   colour with usage.
 - **20% notifications** — a Windows toast each time the 5h or weekly window crosses
