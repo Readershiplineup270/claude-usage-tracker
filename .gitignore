@@ -18,6 +18,9 @@ history.json
 last_snapshot.json
 *.log
 
+# Local operational record (personal notes — not for the public repo)
+docs/HANDOFF.md
+
 # Tooling scratch
 .playwright-mcp/
 
