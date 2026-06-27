@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.16"
+__version__ = "0.1.17"
 
 
 def _data_dir() -> Path:
@@ -1891,10 +1891,11 @@ WIDGET_HTML = r"""<!doctype html>
   .top .tier{color:var(--ink);font:600 12.5px/1 var(--sans);letter-spacing:0;
     max-width:52%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   select.tier{appearance:none;-webkit-appearance:none;border:0;background-color:transparent;cursor:pointer;
-    padding:2px 15px 2px 5px;border-radius:5px;
-    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6' fill='none' stroke='%239b9a95' stroke-width='1.4'%3E%3Cpath d='M1 1l4 4 4-4'/%3E%3C/svg%3E");
-    background-repeat:no-repeat;background-position:right 3px center}
-  select.tier:hover{background-color:rgba(255,255,255,.06)}
+    padding:3px 18px 3px 6px;border-radius:6px;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6' viewBox='0 0 9 6' fill='none' stroke='%239b9a95' stroke-width='1.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1.5 4.5 4.5 8 1.5'/%3E%3C/svg%3E");
+    background-repeat:no-repeat;background-position:right 6px center;background-size:9px 6px}
+  select.tier:hover{background-color:rgba(255,255,255,.06);color:var(--accent)}
+  select.tier:focus{outline:none;background-color:rgba(255,255,255,.06)}
   select.tier option{background:#1d1d20;color:var(--ink);font-weight:500}
   .top .verdict{margin-left:auto;font:700 11px/1 var(--sans);padding-right:6px;white-space:nowrap}
   .top .x{cursor:pointer;color:var(--faint);font-size:15px;line-height:1;padding:0 3px}
