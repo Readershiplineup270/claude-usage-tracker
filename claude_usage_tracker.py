@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.23"
+__version__ = "0.1.24"
 
 
 def _data_dir() -> Path:
@@ -119,13 +119,17 @@ DEFAULT_CONFIG = {
     "bar_fields": ["dir", "ctx", "5h", "7d"],   # which fields the HUD bar shows, in order
     "bar_opacity": 85,                          # bar background opacity, 30-100 (%)
     "bar_show_refresh": "hover",                # "hover" | "always" | "never"
+    "status_check": True,                       # poll status.anthropic.com
+    "status_interval_seconds": 300,
+    "status_components": [],                    # component names to watch ([] = overall status)
 }
 
 # Settings the dashboard/settings UI may change at runtime (allowlist for POST /api/config).
 CONFIG_ALLOW = {
     "show_widget_on_start", "show_bar_on_start", "bar_fields", "bar_opacity",
     "bar_show_refresh", "widget_width", "widget_height", "bar_width", "bar_height",
-    "open_as_window", "predictive_alerts", "update_check",
+    "open_as_window", "predictive_alerts", "update_check", "danger_alerts",
+    "status_check", "status_components",
 }
 
 LABELS = {
@@ -1079,6 +1083,28 @@ def check_github_latest():
         return None, None
 
 
+STATUS_URL = "https://status.anthropic.com/api/v2/summary.json"   # -> status.claude.com (Statuspage)
+
+
+def fetch_status():
+    """Anthropic/Claude service status (Statuspage v2). Returns
+    {indicator, description, components:[{name,status}], url} or None. Slow-poll only."""
+    try:
+        req = urllib.request.Request(STATUS_URL, headers={
+            "User-Agent": "claude-usage-tracker", "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            d = json.load(resp)
+        st = d.get("status", {}) or {}
+        comps = [{"name": c.get("name", ""), "status": c.get("status", "operational")}
+                 for c in d.get("components", []) if not c.get("group")]
+        return {"indicator": st.get("indicator", "none"),
+                "description": st.get("description", ""),
+                "components": comps,
+                "url": (d.get("page", {}) or {}).get("url", "https://status.anthropic.com")}
+    except Exception:
+        return None
+
+
 def build_snapshot(r: FetchResult, hist: dict, cfg: dict) -> dict:
     now_s = time.time()
     oauth = read_oauth()
@@ -1497,6 +1523,11 @@ DASHBOARD_HTML = r"""<!doctype html>
   .fields label{display:inline-flex;align-items:center;gap:8px;color:var(--ink);font-size:13px;cursor:pointer;
     background:var(--bg);border:1px solid var(--line2);border-radius:8px;padding:9px 11px}
   .setacts{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .statuspill{display:inline-flex;align-items:center;gap:6px;font:11px/1 var(--mono);color:var(--dim);
+    text-decoration:none;padding:5px 9px;border:1px solid var(--line);border-radius:6px;white-space:nowrap;
+    max-width:200px;overflow:hidden;text-overflow:ellipsis}
+  .statuspill:hover{color:var(--ink);border-color:rgba(255,255,255,.18)}
+  .statuspill i{width:7px;height:7px;border-radius:50%;flex:none}
 </style>
 </head>
 <body>
@@ -1510,6 +1541,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="badge" id="tier">—</div>
     <div class="vpill" id="vpill"></div>
     <div class="live"><span class="dot" id="livedot"></span><span id="livetxt">live</span></div>
+    <a class="statuspill" id="statuspill" target="_blank" rel="noopener" hidden title="Anthropic status"></a>
     <button class="updcta" id="updcta" hidden></button>
     <button class="ic" id="btn-refresh" title="Re-check usage now">↻</button>
   </header>
@@ -1644,6 +1676,11 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="card panel">
       <div class="ptitle">Minimal bar — fields shown</div>
       <div id="set-fields" class="fields"></div>
+    </div>
+    <div class="card panel">
+      <div class="ptitle">Anthropic status — components to watch</div>
+      <div id="set-status" class="fields"></div>
+      <div class="csub" style="margin-top:8px">None selected = overall status. Shown on the dashboard, widget, and bar.</div>
     </div>
     <div class="card panel">
       <div class="ptitle">Actions</div>
@@ -1868,7 +1905,7 @@ function renderSeries(bins){
   lbl(4,bins[0].label,"start"); if(n>1)lbl(W-4,bins[n-1].label,"end");
 }
 let LASTD={};
-const BARFIELDS=[["dir","Directory"],["acct","Account"],["ctx","Context %"],["5h","5-hour %"],["7d","Weekly %"],["verdict","Verdict"]];
+const BARFIELDS=[["dir","Directory"],["acct","Account"],["ctx","Context %"],["5h","5-hour %"],["7d","Weekly %"],["verdict","Verdict"],["status","Anthropic status"]];
 async function postCfg(patch){ try{ await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)}); }catch(e){} }
 async function postOverlay(id){ try{ await fetch("/api/overlay",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})}); }catch(e){} }
 function syncOverlayLabels(){
@@ -1889,6 +1926,31 @@ function renderSettings(){
     postCfg({bar_fields:picked.length?picked:["dir"]});
   }));
   syncOverlayLabels();
+  renderStatusPicker();
+}
+const IND_COL={none:"#5e9e72",minor:"#cda24e",major:"#d4694f",critical:"#c94f38"};
+const COMP_COL={operational:"#5e9e72",under_maintenance:"#7f93b0",degraded_performance:"#cda24e",partial_outage:"#d4694f",major_outage:"#c94f38"};
+const COMP_RANK={operational:0,under_maintenance:1,degraded_performance:2,partial_outage:3,major_outage:4};
+function prettyStatus(s){ return (s||"").replace(/_/g," ").replace(/^./,c=>c.toUpperCase()); }
+function statusView(d){
+  const s=d.status; if(!s)return null;
+  const watch=((d.ui||{}).status_components)||[];
+  if(watch.length && s.components){
+    let worst="operational";
+    s.components.filter(c=>watch.indexOf(c.name)>=0).forEach(c=>{ if((COMP_RANK[c.status]||0)>(COMP_RANK[worst]||0))worst=c.status; });
+    return {color:COMP_COL[worst]||"#5e9e72", text:(worst==="operational"?"Operational":prettyStatus(worst)), url:s.url};
+  }
+  return {color:IND_COL[s.indicator]||"#5e9e72", text:s.description||"Status", url:s.url};
+}
+function renderStatusPicker(){
+  const box=$("set-status"); if(!box)return;
+  const comps=((LASTD.status||{}).components)||[], watch=((LASTD.ui||{}).status_components)||[];
+  if(!comps.length){ box.innerHTML="<div class='sempty'>status unavailable</div>"; return; }
+  box.innerHTML=comps.map(c=>"<label><input type='checkbox' data-c=\""+esc(c.name)+"\""+(watch.indexOf(c.name)>=0?" checked":"")+"> "+esc(c.name)+"</label>").join("");
+  box.querySelectorAll("input").forEach(i=>i.addEventListener("change",()=>{
+    const picked=[...box.querySelectorAll("input")].filter(x=>x.checked).map(x=>x.dataset.c);
+    postCfg({status_components:picked});
+  }));
 }
 function renderAlltime(a){
   if(a)AT=a;
@@ -1945,6 +2007,8 @@ async function refresh(){
     renderAlltime(d.alltime);
     const up=d.update||{}, cta=$("updcta");
     if(cta){ if(up.available){ cta.hidden=false; if(!cta.disabled)cta.textContent="Update to v"+up.available; } else { cta.hidden=true; } }
+    const sv=statusView(d), sp=$("statuspill");
+    if(sp){ if(sv){ sp.hidden=false; sp.href=sv.url||"#"; sp.innerHTML="<i style='background:"+sv.color+"'></i>"+esc(sv.text); } else { sp.hidden=true; } }
     tickCountdowns();
   }catch(e){ $("err").className="err show"; $("err").textContent="⚠ cannot reach the tracker service."; }
 }
@@ -2019,6 +2083,7 @@ WIDGET_HTML = r"""<!doctype html>
   .top .verdict{margin-left:auto;font:700 11px/1 var(--sans);padding-right:6px;white-space:nowrap}
   .top .x{cursor:pointer;color:var(--faint);font-size:15px;line-height:1;padding:0 3px}
   .top .x:hover{color:var(--ink)}
+  .sdot2{width:7px;height:7px;border-radius:50%;flex:none;display:inline-block}
   #body{flex:1;display:flex;flex-direction:column;justify-content:center;gap:clamp(6px,1.8vh,11px);min-height:0}
   .row{display:flex;align-items:center;gap:10px}
   .lab{width:34px;color:var(--dim);font:600 11px/1 var(--mono);text-transform:uppercase}
@@ -2051,7 +2116,7 @@ WIDGET_HTML = r"""<!doctype html>
 <body>
   <div class="top">
     <span class="dot" id="dot"></span><span class="ttl" id="acct">Claude usage</span>
-    <select class="tier" id="tier" title="Track a session"></select><span class="verdict" id="verdict"></span><span class="x" onclick="closeWidget()" title="Hide">×</span>
+    <select class="tier" id="tier" title="Track a session"></select><span class="verdict" id="verdict"></span><span class="sdot2" id="wstatus" title="Anthropic status" style="display:none"></span><span class="x" onclick="closeWidget()" title="Hide">×</span>
   </div>
   <div id="body">
     <div class="row"><span class="lab">5h</span><div class="bar"><i id="b5"></i></div><span class="pc" id="pc5">–</span><span class="cd" id="cd5"></span></div>
@@ -2107,6 +2172,19 @@ function curContext(d){         // context for the selected session, or the acti
 function pctOf(wins,key){ const w=(wins||[]).find(x=>x.key===key); return w?w.pct:null; }
 function bfld(label,pct){ return pct==null?"":"<span class='f'>"+label+" <b style='color:"+bandColor(pct)+"'>"+Math.round(pct)+"%</b></span>"; }
 function refreshNow2(){ fetch("/api/refresh",{method:"POST"}).catch(()=>{}); setTimeout(refresh,500); }
+const IND_COL={none:"#5e9e72",minor:"#cda24e",major:"#d4694f",critical:"#c94f38"};
+const COMP_COL={operational:"#5e9e72",under_maintenance:"#7f93b0",degraded_performance:"#cda24e",partial_outage:"#d4694f",major_outage:"#c94f38"};
+const COMP_RANK={operational:0,under_maintenance:1,degraded_performance:2,partial_outage:3,major_outage:4};
+function statusView(d){
+  const s=d.status; if(!s)return null;
+  const watch=((d.ui||{}).status_components)||[];
+  if(watch.length && s.components){
+    let worst="operational";
+    s.components.filter(c=>watch.indexOf(c.name)>=0).forEach(c=>{ if((COMP_RANK[c.status]||0)>(COMP_RANK[worst]||0))worst=c.status; });
+    return {color:COMP_COL[worst]||"#5e9e72", text:(worst==="operational"?"OK":worst.replace(/_/g," "))};
+  }
+  return {color:IND_COL[s.indicator]||"#5e9e72", text:(s.indicator==="none"?"OK":(s.description||"status"))};
+}
 function renderBar(d){           // minimal one-line HUD (configurable fields, in order)
   const wins=d.windows||[], ui=d.ui||{};
   if(!d.ok && !wins.length){ $("bar").innerHTML="<span class='f dir'>"+esc(d.error||"unavailable")+"</span>"; return; }
@@ -2119,6 +2197,7 @@ function renderBar(d){           // minimal one-line HUD (configurable fields, i
     if(f==="5h")     return bfld("5h:",pctOf(wins,"five_hour"));
     if(f==="7d"||f==="week") return bfld("7d:",pctOf(wins,"seven_day"));
     if(f==="verdict")return v&&v.text?"<span class='f' style='color:"+v.color+"'>"+esc(v.text)+"</span>":"";
+    if(f==="status"){ const sv=statusView(d); return sv?"<span class='f' title='Anthropic status'><span class='sdot2' style='background:"+sv.color+"'></span>"+esc(sv.text)+"</span>":""; }
     return "";
   };
   let html=fields.map(part).join("");
@@ -2148,6 +2227,8 @@ async function refresh(){ try{
     $("pcc").textContent=Math.round(p)+"%"; $("pcc").style.color=col;
     $("cdc").textContent=cx.tok?fmtTok(cx.tok):"";
   } else { $("bc").style.width="0%"; $("pcc").textContent="–"; $("pcc").style.color=""; $("cdc").textContent=""; }
+  const sv=statusView(d), ws=$("wstatus");
+  if(ws){ if(sv){ ws.style.display="inline-block"; ws.style.background=sv.color; ws.title="Anthropic status: "+sv.text; } else ws.style.display="none"; }
   tick();
 }catch(e){ if(KIND!=="bar"){ $("dot").style.background="#cda24e"; } } }
 // Resize is handled natively by the OS (WS_THICKFRAME) — no JS resize math (DPI-safe).
@@ -2987,6 +3068,8 @@ class TrayApp:
         self._verdict = getattr(self, "_verdict", "")
         self._update_available = getattr(self, "_update_available", None)
         self._update_url = getattr(self, "_update_url", None)
+        self._status = getattr(self, "_status", None)
+        status_iv = int(self.cfg.get("status_interval_seconds", 300))
         sessions_iv = int(self.cfg.get("sessions_interval_seconds", 45))
         sessions_top = int(self.cfg.get("sessions_top_n", 8))
         alltime_iv = int(self.cfg.get("alltime_interval_seconds", 600))
@@ -2996,6 +3079,7 @@ class TrayApp:
         last_sessions = 0.0
         last_alltime = 0.0
         last_update = 0.0
+        last_status = 0.0
         warned_token = False
         while not self._stop.is_set():
             try:
@@ -3014,6 +3098,11 @@ class TrayApp:
                         if not getattr(self, "_update_notified", False):
                             notify("Update available", f"v{latest} — open the tray menu → Update")
                             self._update_notified = True
+                if self.cfg.get("status_check", True) and (now - last_status >= status_iv):
+                    last_status = now
+                    s = fetch_status()
+                    if s:
+                        self._status = s
                 sl = read_statusline_snapshot()
                 fresh = bool(sl and (now - sl["ts"]) <= stale_secs)
                 # Prefer the statusline file (no API). Hit /api/oauth/usage only to
@@ -3071,9 +3160,10 @@ class TrayApp:
                 snap["cwd"] = self._cwd
                 snap["alltime"] = self._alltime
                 snap["update"] = {"available": self._update_available, "url": self._update_url}
+                snap["status"] = self._status
                 snap["ui"] = {k: self.cfg.get(k) for k in
                               ("bar_fields", "bar_opacity", "bar_show_refresh",
-                               "show_widget_on_start", "show_bar_on_start")}
+                               "show_widget_on_start", "show_bar_on_start", "status_components")}
                 snap["config_epoch"] = self._config_epoch
                 snap["overlays_alive"] = {"widget": self._widget_alive(), "bar": self._bar_alive()}
                 self._verdict = (snap.get("verdict") or {}).get("text", "")
