@@ -55,9 +55,10 @@ talks to nothing but that one Anthropic endpoint.
   and pip/pipx installs upgrade themselves via the app's own Python (no `pipx` on PATH
   needed, no trip to GitHub). **Refresh** and **Check for updates** are one click away in
   the dashboard, widget, and tray menu too.
-- **Anthropic status** — a live service-status indicator (from status.anthropic.com) on the
-  dashboard, widget, and bar; pick which components to watch (claude.ai / API / Claude Code / …)
-  in Settings, or show the overall status.
+- **Anthropic status** — a live **Ok / Errors / Down** service-status indicator (from
+  status.anthropic.com) on the dashboard, widget, and bar, plus a **Status tab** listing every
+  component (claude.ai / API / Claude Code / Console / …). Pick which components drive the
+  indicator in Settings, or use the overall status.
 - **Live tray icon** — two bars (left = 5h, right = weekly) that fill and change
   colour with usage.
 - **20% notifications** — a Windows toast each time the 5h or weekly window crosses

@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.24"
+__version__ = "0.1.25"
 
 
 def _data_dir() -> Path:
@@ -116,7 +116,7 @@ DEFAULT_CONFIG = {
     "show_bar_on_start": False,      # the minimal one-line HUD bar overlay
     "bar_width": 340,
     "bar_height": 30,
-    "bar_fields": ["dir", "ctx", "5h", "7d"],   # which fields the HUD bar shows, in order
+    "bar_fields": ["dir", "ctx", "5h", "7d", "status"],   # which fields the HUD bar shows, in order
     "bar_opacity": 85,                          # bar background opacity, 30-100 (%)
     "bar_show_refresh": "hover",                # "hover" | "always" | "never"
     "status_check": True,                       # poll status.anthropic.com
@@ -1528,6 +1528,10 @@ DASHBOARD_HTML = r"""<!doctype html>
     max-width:200px;overflow:hidden;text-overflow:ellipsis}
   .statuspill:hover{color:var(--ink);border-color:rgba(255,255,255,.18)}
   .statuspill i{width:7px;height:7px;border-radius:50%;flex:none}
+  .strow{display:flex;align-items:center;gap:11px;margin:12px 0;font-size:13px}
+  .strow .sdotb{width:9px;height:9px;border-radius:50%;flex:none}
+  .strow .sname2{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .strow .sword{margin-left:auto;font:700 12px/1 var(--mono)}
 </style>
 </head>
 <body>
@@ -1551,6 +1555,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   <div class="tabs">
     <button class="tab on" data-t="live">Live</button>
     <button class="tab" data-t="alltime">All-time</button>
+    <button class="tab" data-t="status">Status</button>
     <button class="tab" data-t="settings">Settings</button>
   </div>
 
@@ -1660,6 +1665,17 @@ DASHBOARD_HTML = r"""<!doctype html>
         <div class="ptitle">By model</div>
         <div id="at-models"></div>
       </div>
+    </div>
+  </div>
+
+  <div id="tab-status" class="tabpane" hidden>
+    <div class="card panel">
+      <div class="ptitle"><span>Anthropic status</span><a class="legend" target="_blank" rel="noopener" href="https://status.anthropic.com">status.anthropic.com ↗</a></div>
+      <div class="big" id="status-head" style="font-size:clamp(22px,5vw,32px)">—</div>
+    </div>
+    <div class="card panel">
+      <div class="ptitle">All components</div>
+      <div id="status-list"></div>
     </div>
   </div>
 
@@ -1928,19 +1944,33 @@ function renderSettings(){
   syncOverlayLabels();
   renderStatusPicker();
 }
-const IND_COL={none:"#5e9e72",minor:"#cda24e",major:"#d4694f",critical:"#c94f38"};
-const COMP_COL={operational:"#5e9e72",under_maintenance:"#7f93b0",degraded_performance:"#cda24e",partial_outage:"#d4694f",major_outage:"#c94f38"};
 const COMP_RANK={operational:0,under_maintenance:1,degraded_performance:2,partial_outage:3,major_outage:4};
+const IND_SEV={none:0,minor:2,major:4,critical:4};
+function sevColor(sev){ return sev<=0?"#5e9e72":(sev>=4?"#c94f38":"#cda24e"); }
+function sevWord(sev){ return sev<=0?"Ok":(sev>=4?"Down":"Errors"); }
 function prettyStatus(s){ return (s||"").replace(/_/g," ").replace(/^./,c=>c.toUpperCase()); }
-function statusView(d){
+function statusView(d){          // -> {color, word: Ok|Errors|Down, text, url}
   const s=d.status; if(!s)return null;
   const watch=((d.ui||{}).status_components)||[];
+  let sev=0, text=s.description||"";
   if(watch.length && s.components){
-    let worst="operational";
-    s.components.filter(c=>watch.indexOf(c.name)>=0).forEach(c=>{ if((COMP_RANK[c.status]||0)>(COMP_RANK[worst]||0))worst=c.status; });
-    return {color:COMP_COL[worst]||"#5e9e72", text:(worst==="operational"?"Operational":prettyStatus(worst)), url:s.url};
+    s.components.filter(c=>watch.indexOf(c.name)>=0).forEach(c=>{ sev=Math.max(sev,COMP_RANK[c.status]||0); });
+  } else {
+    sev=(IND_SEV[s.indicator]!=null?IND_SEV[s.indicator]:0);
   }
-  return {color:IND_COL[s.indicator]||"#5e9e72", text:s.description||"Status", url:s.url};
+  return {color:sevColor(sev), word:sevWord(sev), text:text, url:s.url};
+}
+function renderStatusPage(){
+  const s=LASTD.status, head=$("status-head"), box=$("status-list");
+  if(!head||!box)return;
+  if(!s){ head.textContent="status unavailable"; box.innerHTML=""; return; }
+  const ov=statusView({status:s, ui:{}});
+  head.innerHTML="<span style='color:"+ov.color+"'>"+ov.word+"</span> <span style='font-size:.55em;color:var(--dim);font-family:var(--sans)'>"+esc(s.description||"")+"</span>";
+  box.innerHTML=(s.components||[]).map(c=>{ const sev=COMP_RANK[c.status]||0;
+    return "<div class='strow'><span class='sdotb' style='background:"+sevColor(sev)+"'></span>"+
+      "<span class='sname2'>"+esc(c.name)+"</span>"+
+      "<span class='sword' style='color:"+sevColor(sev)+"' title='"+esc(prettyStatus(c.status))+"'>"+sevWord(sev)+"</span></div>";
+  }).join("")||"<div class='sempty'>no components</div>";
 }
 function renderStatusPicker(){
   const box=$("set-status"); if(!box)return;
@@ -2008,7 +2038,8 @@ async function refresh(){
     const up=d.update||{}, cta=$("updcta");
     if(cta){ if(up.available){ cta.hidden=false; if(!cta.disabled)cta.textContent="Update to v"+up.available; } else { cta.hidden=true; } }
     const sv=statusView(d), sp=$("statuspill");
-    if(sp){ if(sv){ sp.hidden=false; sp.href=sv.url||"#"; sp.innerHTML="<i style='background:"+sv.color+"'></i>"+esc(sv.text); } else { sp.hidden=true; } }
+    if(sp){ if(sv){ sp.hidden=false; sp.href=sv.url||"#"; sp.title="Anthropic status — "+sv.text; sp.innerHTML="<i style='background:"+sv.color+"'></i>"+esc(sv.word); } else { sp.hidden=true; } }
+    if(!$("tab-status").hidden)renderStatusPage();
     tickCountdowns();
   }catch(e){ $("err").className="err show"; $("err").textContent="⚠ cannot reach the tracker service."; }
 }
@@ -2037,8 +2068,10 @@ document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{
   document.querySelectorAll(".tab").forEach(x=>x.classList.remove("on"));
   b.classList.add("on");
   const t=b.dataset.t;
-  $("tab-live").hidden=(t!=="live"); $("tab-alltime").hidden=(t!=="alltime"); $("tab-settings").hidden=(t!=="settings");
+  $("tab-live").hidden=(t!=="live"); $("tab-alltime").hidden=(t!=="alltime");
+  $("tab-status").hidden=(t!=="status"); $("tab-settings").hidden=(t!=="settings");
   if(t==="alltime")renderAlltime();   // (re)draw now that the pane has layout
+  if(t==="status")renderStatusPage();
   if(t==="settings")renderSettings();
 }));
 $("set-toggle-bar").onclick=function(){ const sh=this.textContent==="Hide"; this.textContent=sh?"Show":"Hide"; this.classList.toggle("on",!sh); postOverlay("bar"); };
@@ -2084,6 +2117,7 @@ WIDGET_HTML = r"""<!doctype html>
   .top .x{cursor:pointer;color:var(--faint);font-size:15px;line-height:1;padding:0 3px}
   .top .x:hover{color:var(--ink)}
   .sdot2{width:7px;height:7px;border-radius:50%;flex:none;display:inline-block}
+  .wstat{display:inline-flex;align-items:center;gap:4px;font:600 10px/1 var(--mono);white-space:nowrap}
   #body{flex:1;display:flex;flex-direction:column;justify-content:center;gap:clamp(6px,1.8vh,11px);min-height:0}
   .row{display:flex;align-items:center;gap:10px}
   .lab{width:34px;color:var(--dim);font:600 11px/1 var(--mono);text-transform:uppercase}
@@ -2116,7 +2150,7 @@ WIDGET_HTML = r"""<!doctype html>
 <body>
   <div class="top">
     <span class="dot" id="dot"></span><span class="ttl" id="acct">Claude usage</span>
-    <select class="tier" id="tier" title="Track a session"></select><span class="verdict" id="verdict"></span><span class="sdot2" id="wstatus" title="Anthropic status" style="display:none"></span><span class="x" onclick="closeWidget()" title="Hide">×</span>
+    <select class="tier" id="tier" title="Track a session"></select><span class="verdict" id="verdict"></span><span class="wstat" id="wstatus" title="Anthropic status" style="display:none"></span><span class="x" onclick="closeWidget()" title="Hide">×</span>
   </div>
   <div id="body">
     <div class="row"><span class="lab">5h</span><div class="bar"><i id="b5"></i></div><span class="pc" id="pc5">–</span><span class="cd" id="cd5"></span></div>
@@ -2172,24 +2206,24 @@ function curContext(d){         // context for the selected session, or the acti
 function pctOf(wins,key){ const w=(wins||[]).find(x=>x.key===key); return w?w.pct:null; }
 function bfld(label,pct){ return pct==null?"":"<span class='f'>"+label+" <b style='color:"+bandColor(pct)+"'>"+Math.round(pct)+"%</b></span>"; }
 function refreshNow2(){ fetch("/api/refresh",{method:"POST"}).catch(()=>{}); setTimeout(refresh,500); }
-const IND_COL={none:"#5e9e72",minor:"#cda24e",major:"#d4694f",critical:"#c94f38"};
-const COMP_COL={operational:"#5e9e72",under_maintenance:"#7f93b0",degraded_performance:"#cda24e",partial_outage:"#d4694f",major_outage:"#c94f38"};
 const COMP_RANK={operational:0,under_maintenance:1,degraded_performance:2,partial_outage:3,major_outage:4};
-function statusView(d){
+const IND_SEV={none:0,minor:2,major:4,critical:4};
+function sevColor(sev){ return sev<=0?"#5e9e72":(sev>=4?"#c94f38":"#cda24e"); }
+function sevWord(sev){ return sev<=0?"Ok":(sev>=4?"Down":"Errors"); }
+function statusView(d){          // -> {color, word: Ok|Errors|Down}
   const s=d.status; if(!s)return null;
   const watch=((d.ui||{}).status_components)||[];
+  let sev=0;
   if(watch.length && s.components){
-    let worst="operational";
-    s.components.filter(c=>watch.indexOf(c.name)>=0).forEach(c=>{ if((COMP_RANK[c.status]||0)>(COMP_RANK[worst]||0))worst=c.status; });
-    return {color:COMP_COL[worst]||"#5e9e72", text:(worst==="operational"?"OK":worst.replace(/_/g," "))};
-  }
-  return {color:IND_COL[s.indicator]||"#5e9e72", text:(s.indicator==="none"?"OK":(s.description||"status"))};
+    s.components.filter(c=>watch.indexOf(c.name)>=0).forEach(c=>{ sev=Math.max(sev,COMP_RANK[c.status]||0); });
+  } else { sev=(IND_SEV[s.indicator]!=null?IND_SEV[s.indicator]:0); }
+  return {color:sevColor(sev), word:sevWord(sev)};
 }
 function renderBar(d){           // minimal one-line HUD (configurable fields, in order)
   const wins=d.windows||[], ui=d.ui||{};
   if(!d.ok && !wins.length){ $("bar").innerHTML="<span class='f dir'>"+esc(d.error||"unavailable")+"</span>"; return; }
   const cx=curContext(d), dir=SEL||actDir(d), acc=d.account||{}, v=d.verdict;
-  const fields=(ui.bar_fields&&ui.bar_fields.length)?ui.bar_fields:["dir","ctx","5h","7d"];
+  const fields=(ui.bar_fields&&ui.bar_fields.length)?ui.bar_fields:["dir","ctx","5h","7d","status"];
   const part=f=>{
     if(f==="dir")    return "<span class='f dir' title='"+esc(d.cwd||"")+"'>"+esc(dir)+"</span>";
     if(f==="acct")   return "<span class='f dir'>"+esc(acc.org||acc.name||(acc.email||"").split("@")[0]||"")+"</span>";
@@ -2197,7 +2231,7 @@ function renderBar(d){           // minimal one-line HUD (configurable fields, i
     if(f==="5h")     return bfld("5h:",pctOf(wins,"five_hour"));
     if(f==="7d"||f==="week") return bfld("7d:",pctOf(wins,"seven_day"));
     if(f==="verdict")return v&&v.text?"<span class='f' style='color:"+v.color+"'>"+esc(v.text)+"</span>":"";
-    if(f==="status"){ const sv=statusView(d); return sv?"<span class='f' title='Anthropic status'><span class='sdot2' style='background:"+sv.color+"'></span>"+esc(sv.text)+"</span>":""; }
+    if(f==="status"){ const sv=statusView(d); return sv?"<span class='f' title='Anthropic status' style='color:"+sv.color+"'><span class='sdot2' style='background:"+sv.color+"'></span>"+sv.word+"</span>":""; }
     return "";
   };
   let html=fields.map(part).join("");
@@ -2228,7 +2262,8 @@ async function refresh(){ try{
     $("cdc").textContent=cx.tok?fmtTok(cx.tok):"";
   } else { $("bc").style.width="0%"; $("pcc").textContent="–"; $("pcc").style.color=""; $("cdc").textContent=""; }
   const sv=statusView(d), ws=$("wstatus");
-  if(ws){ if(sv){ ws.style.display="inline-block"; ws.style.background=sv.color; ws.title="Anthropic status: "+sv.text; } else ws.style.display="none"; }
+  if(ws){ if(sv){ ws.style.display="inline-flex"; ws.style.color=sv.color;
+      ws.innerHTML="<span class='sdot2' style='background:"+sv.color+"'></span>"+sv.word; } else ws.style.display="none"; }
   tick();
 }catch(e){ if(KIND!=="bar"){ $("dot").style.background="#cda24e"; } } }
 // Resize is handled natively by the OS (WS_THICKFRAME) — no JS resize math (DPI-safe).
