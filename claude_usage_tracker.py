@@ -35,7 +35,7 @@ import traceback
 import urllib.error
 import urllib.request
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.10"
+__version__ = "0.1.11"
 
 
 def _data_dir() -> Path:
@@ -70,6 +70,7 @@ CONFIG_PATH = APP_DIR / "config.json"
 STATE_PATH = APP_DIR / "state.json"
 HISTORY_PATH = APP_DIR / "history.json"
 SNAPSHOT_PATH = APP_DIR / "last_snapshot.json"
+ALLTIME_PATH = APP_DIR / "alltime.json"   # persisted lifetime token tallies + per-file read offsets
 # Written by the Claude Code statusline (scripts/statusline.py) on every render —
 # the app's primary, API-free source of live 5h/weekly usage.
 STATUSLINE_SNAPSHOT = Path(os.path.expanduser("~")) / ".claude" / "usage-snapshot.json"
@@ -95,6 +96,9 @@ DEFAULT_CONFIG = {
     "api_fallback_interval_seconds": 300,# min gap between API polls when no statusline data
     "sessions_interval_seconds": 45,     # how often to rescan local session logs
     "sessions_top_n": 8,
+    "alltime_interval_seconds": 600,     # how often to fold new session bytes into lifetime totals
+    "alltime_top_n": 8,                  # projects shown on the All-time tab
+    "alltime_days": 30,                  # span of the daily-usage chart
     "predictive_alerts": True,           # burn-rate / context-full / overage toasts
     "update_check": True,                # daily check for a newer version on PyPI
     "threshold_step": 20,            # ping every N percent
@@ -642,6 +646,169 @@ def scan_sessions(cache: dict, now: float, window_s: int = 5 * 3600,
     return rows[:top_n]
 
 
+# ---------------------------------------------------------------------------
+# All-time totals (lifetime token usage across every local session log)
+# ---------------------------------------------------------------------------
+
+ALLTIME_VERSION = 1
+
+MODEL_NAMES = {
+    "claude-opus-4-8": "Opus 4.8", "claude-opus-4-7": "Opus 4.7",
+    "claude-opus-4-6": "Opus 4.6", "claude-opus-4-5": "Opus 4.5",
+    "claude-sonnet-4-6": "Sonnet 4.6", "claude-sonnet-4-5": "Sonnet 4.5",
+    "claude-haiku-4-5": "Haiku 4.5", "claude-fable-5": "Fable 5",
+}
+
+
+def pretty_model(raw) -> str:
+    """'claude-opus-4-8' -> 'Opus 4.8'. Falls back gracefully for unknown ids
+    (and date-suffixed ones like 'claude-haiku-4-5-20251001' -> 'Haiku 4.5')."""
+    s = str(raw or "").strip()
+    if s in MODEL_NAMES:
+        return MODEL_NAMES[s]
+    low = s.lower()
+    for fam in ("opus", "sonnet", "haiku", "fable"):
+        if fam in low:
+            nums = [c for c in low.split(fam, 1)[1].replace("_", "-").split("-")
+                    if c.isdigit() and len(c) <= 2]   # version parts, not a date stamp
+            return (fam.capitalize() + " " + ".".join(nums[:2])).strip()
+    if not s or s.startswith("<"):
+        return "Other"
+    return s.replace("claude-", "").replace("-", " ").strip().title() or "Other"
+
+
+def _empty_alltime_cache() -> dict:
+    return {"v": ALLTIME_VERSION, "files": {}, "models": {}, "projects": {},
+            "days": {}, "first_ts": None, "last_ts": None}
+
+
+def _acc(d: dict, key: str, inp, out, cw, cr) -> None:
+    r = d.get(key)
+    if r is None:
+        r = d[key] = {"in": 0, "out": 0, "cw": 0, "cr": 0, "msgs": 0}
+    r["in"] += inp; r["out"] += out; r["cw"] += cw; r["cr"] += cr; r["msgs"] += 1
+
+
+def _at_tokens(r) -> int:
+    # headline metric: real work = input + output + cache writes; cheap cache reads excluded
+    return r["in"] + r["out"] + r["cw"]
+
+
+def scan_all_time(cache: dict, now: float, top_n: int = 8, days: int = 30) -> dict:
+    """Lifetime Claude Code token totals from ~/.claude/projects/*/*.jsonl.
+
+    Each session log is read incrementally — only the bytes appended since the
+    last scan, tracked per file in `cache["files"]` — so the first call backfills
+    the whole history and every later call is cheap. Token counts and timestamps
+    only; message content is never read. `cache` is mutated and persisted between
+    runs. Returns a display dict for the dashboard's All-time tab.
+    """
+    if not isinstance(cache, dict) or cache.get("v") != ALLTIME_VERSION:
+        cache.clear()
+        cache.update(_empty_alltime_cache())
+    files = cache["files"]
+    try:
+        paths = list(PROJECTS_DIR.glob("*/*.jsonl"))
+    except Exception:
+        paths = []
+
+    for f in paths:
+        try:
+            st = f.stat()
+        except Exception:
+            continue
+        key = str(f)
+        consumed = files.get(key, 0)
+        if st.st_size == consumed:
+            continue                          # nothing new since last scan
+        if st.st_size < consumed:             # rotated / truncated -> re-read from the top
+            consumed = 0
+        cwd = None
+        try:
+            with open(f, "r", encoding="utf-8", errors="replace") as fh:
+                fh.seek(consumed)
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        o = json.loads(line)
+                    except Exception:
+                        continue
+                    if cwd is None and isinstance(o.get("cwd"), str):
+                        cwd = o["cwd"]
+                    msg = o.get("message")
+                    u = msg.get("usage") if isinstance(msg, dict) else o.get("usage")
+                    if not isinstance(u, dict):
+                        continue
+                    inp = int(u.get("input_tokens", 0) or 0)
+                    out = int(u.get("output_tokens", 0) or 0)
+                    cw = int(u.get("cache_creation_input_tokens", 0) or 0)
+                    cr = int(u.get("cache_read_input_tokens", 0) or 0)
+                    if inp == out == cw == cr == 0:
+                        continue
+                    model = pretty_model(msg.get("model") if isinstance(msg, dict) else None)
+                    name = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] if cwd else Path(key).parent.name
+                    _acc(cache["models"], model, inp, out, cw, cr)
+                    _acc(cache["projects"], name, inp, out, cw, cr)
+                    ts = _parse_iso(o.get("timestamp"))
+                    if ts:
+                        _acc(cache["days"], datetime.fromtimestamp(ts).strftime("%Y-%m-%d"),
+                             inp, out, cw, cr)
+                        cache["first_ts"] = ts if cache["first_ts"] is None else min(cache["first_ts"], ts)
+                        cache["last_ts"] = ts if cache["last_ts"] is None else max(cache["last_ts"], ts)
+            files[key] = st.st_size
+        except Exception:
+            log("all-time scan error on a file:\n" + traceback.format_exc())
+    live = {str(p) for p in paths}
+    for k in list(files.keys()):              # drop offsets for deleted files (totals stay — it's cumulative)
+        if k not in live:
+            del files[k]
+
+    return _alltime_display(cache, now, top_n, days)
+
+
+def _alltime_display(cache: dict, now: float, top_n: int, days: int) -> dict:
+    total = {"in": 0, "out": 0, "cw": 0, "cr": 0, "msgs": 0}
+    for r in cache["models"].values():
+        for k in total:
+            total[k] += r[k]
+
+    def rows(d):
+        out = [{"name": n, "tokens": _at_tokens(r), "in": r["in"], "out": r["out"],
+                "cw": r["cw"], "cr": r["cr"], "msgs": r["msgs"]}
+               for n, r in d.items() if _at_tokens(r) > 0]
+        out.sort(key=lambda x: x["tokens"], reverse=True)
+        return out
+
+    by_model = rows(cache["models"])
+    by_project = rows(cache["projects"])
+    mgrand = sum(r["tokens"] for r in by_model) or 1
+    for r in by_model:
+        r["share"] = round(r["tokens"] / mgrand * 100, 1)
+    pgrand = sum(r["tokens"] for r in by_project) or 1
+    for r in by_project:
+        r["share"] = round(r["tokens"] / pgrand * 100, 1)
+
+    # last `days` calendar days (local time), gaps filled with 0
+    series, today = [], datetime.fromtimestamp(now).date()
+    for i in range(days - 1, -1, -1):
+        ds = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        r = cache["days"].get(ds)
+        series.append({"d": ds, "tokens": _at_tokens(r) if r else 0})
+
+    return {
+        "total": total,
+        "tokens": _at_tokens(total),
+        "by_model": by_model,
+        "by_project": by_project[:top_n],
+        "project_count": len(by_project),
+        "days": series,
+        "first_ts": cache.get("first_ts"),
+        "last_ts": cache.get("last_ts"),
+    }
+
+
 def read_statusline_snapshot():
     """Read live 5h/weekly usage written by the Claude Code statusline (no API call).
 
@@ -1060,6 +1227,21 @@ DASHBOARD_HTML = r"""<!doctype html>
     border-radius:14px;color:#ffb4ad;margin-bottom:16px;font-size:13px;display:none}
   .err.show{display:block}
   .skel{opacity:.35}
+  .tabs{display:flex;gap:4px;margin-bottom:16px;background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:11px;padding:4px;width:max-content}
+  .tab{background:none;border:0;color:var(--dim);font:inherit;font-weight:600;font-size:13px;padding:7px 18px;border-radius:8px;cursor:pointer}
+  .tab:hover{color:var(--ink)}
+  .tab.on{background:rgba(255,255,255,.10);color:var(--ink)}
+  .tabpane[hidden]{display:none}
+  .big{font-size:clamp(30px,7vw,46px);font-weight:740;letter-spacing:-1.6px;line-height:1.02}
+  .statgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:11px;margin-top:18px}
+  .stat{background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+  .stat .n{font-size:18px;font-weight:680;font-variant-numeric:tabular-nums}
+  .stat .k{color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.8px;margin-top:4px}
+  .atrow{display:flex;align-items:center;gap:10px;margin:11px 0;font-size:12.5px}
+  .atrow .anm{width:clamp(78px,30%,168px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#d7dde6}
+  .atrow .abar{flex:1;height:9px;border-radius:5px;background:rgba(255,255,255,.08);overflow:hidden}
+  .atrow .abar>i{display:block;height:100%;border-radius:5px;transition:width .7s cubic-bezier(.22,1,.36,1)}
+  .atrow .anum{width:60px;text-align:right;color:var(--dim);font-variant-numeric:tabular-nums}
 </style>
 </head>
 <body>
@@ -1077,6 +1259,12 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   <div class="err" id="err"></div>
 
+  <div class="tabs">
+    <button class="tab on" data-t="live">Live</button>
+    <button class="tab" data-t="alltime">All-time</button>
+  </div>
+
+  <div id="tab-live" class="tabpane">
   <div class="gauges">
     <div class="card gauge" id="g-five_hour">
       <div class="gwrap">
@@ -1139,6 +1327,24 @@ DASHBOARD_HTML = r"""<!doctype html>
     <span><i style="background:#f85149"></i>80–90</span>
     <span><i style="background:#0a0a0c;border:1px solid #2a2f3a"></i>90–99</span>
     <span><i style="background:#ffd60a"></i>100</span>
+  </div>
+  </div><!-- /tab-live -->
+
+  <div id="tab-alltime" class="tabpane" hidden>
+    <div class="card panel">
+      <div class="ptitle"><span>All-time tokens</span><span class="legend" id="at-span"></span></div>
+      <div class="big" id="at-tokens">…</div>
+      <div class="csub" id="at-sub">calculating from your session history…</div>
+      <div class="statgrid" id="at-stats"></div>
+    </div>
+    <div class="row">
+      <div class="card panel"><div class="ptitle">By model</div><div id="at-models"></div></div>
+      <div class="card panel"><div class="ptitle"><span>By project</span><span class="legend" id="at-projmore"></span></div><div id="at-projects"></div></div>
+    </div>
+    <div class="card panel">
+      <div class="ptitle">Daily usage · last 30 days</div>
+      <svg class="spark" id="at-daily" preserveAspectRatio="none"></svg>
+    </div>
   </div>
 
   <footer>
@@ -1265,6 +1471,64 @@ function renderSessions(list){
       "<span class='snum'>"+val+"</span></div>";
   }).join("");
 }
+function fmtTokFull(n){ n=n||0; if(n>=1e9)return (n/1e9).toFixed(2)+"B"; if(n>=1e6)return (n/1e6).toFixed(1)+"M"; if(n>=1e3)return (n/1e3).toFixed(1)+"k"; return ""+Math.round(n); }
+const MODELCOL={Opus:"#d97757",Sonnet:"#c08bff",Haiku:"#5aa3ff",Fable:"#3fb950"};
+function modelColor(name){ for(const k in MODELCOL){ if((name||"").indexOf(k)===0)return MODELCOL[k]; } return "#8b97a8"; }
+let ATDAILY=null;
+function atBar(name,tokens,max,col){
+  const nm=(name||"?").replace(/[<>&]/g,"");
+  const w=Math.max(3,tokens/(max||1)*100);
+  return "<div class='atrow'><span class='anm' title='"+nm+"'>"+nm+"</span>"+
+    "<div class='abar'><i style='width:"+w+"%;background:"+col+"'></i></div>"+
+    "<span class='anum'>"+fmtTokFull(tokens)+"</span></div>";
+}
+function renderDaily(days){
+  const svg=$("at-daily"); if(!svg)return; svg.innerHTML="";
+  const ns="http://www.w3.org/2000/svg";
+  const W=svg.clientWidth||520,H=128,top=12,base=H-18;
+  svg.setAttribute("viewBox","0 0 "+W+" "+H);
+  if(!days||!days.length)return;
+  const max=Math.max.apply(null,days.map(d=>d.tokens).concat([1]));
+  const n=days.length, step=(W-8)/n, bw=Math.max(1,step-2);
+  const bl=document.createElementNS(ns,"line");
+  bl.setAttribute("x1",4);bl.setAttribute("y1",base);bl.setAttribute("x2",W-4);bl.setAttribute("y2",base);
+  bl.setAttribute("stroke","rgba(255,255,255,.10)");svg.appendChild(bl);
+  days.forEach((d,i)=>{
+    if(d.tokens<=0)return;
+    const h=Math.max(2,(d.tokens/max)*(base-top));
+    const r=document.createElementNS(ns,"rect");
+    r.setAttribute("x",(4+i*step).toFixed(1));r.setAttribute("y",(base-h).toFixed(1));
+    r.setAttribute("width",bw.toFixed(1));r.setAttribute("height",h.toFixed(1));r.setAttribute("rx","2");
+    r.setAttribute("fill",i===n-1?"#d97757":"#5aa3ff");
+    const t=document.createElementNS(ns,"title");t.textContent=d.d+" · "+fmtTokFull(d.tokens);r.appendChild(t);
+    svg.appendChild(r);
+  });
+  const lbl=(x,txt,anc)=>{const e=document.createElementNS(ns,"text");e.setAttribute("x",x);e.setAttribute("y",H-4);
+    e.setAttribute("fill","#5b6675");e.setAttribute("font-size","9");if(anc)e.setAttribute("text-anchor",anc);e.textContent=txt;svg.appendChild(e);};
+  lbl(4,days[0].d.slice(5),"start"); lbl(W-4,days[n-1].d.slice(5),"end");
+}
+function renderAlltime(a){
+  const big=$("at-tokens"); if(!big)return;
+  if(!a||!a.total||!a.tokens){
+    big.textContent="…"; $("at-sub").textContent="calculating from your session history…";
+    $("at-stats").innerHTML=""; $("at-models").innerHTML=""; $("at-projects").innerHTML=""; $("at-span").textContent="";
+    return;
+  }
+  const t=a.total;
+  big.innerHTML=fmtTokFull(a.tokens)+" <span style='font-size:.4em;color:var(--dim);font-weight:600;letter-spacing:0'>tokens</span>";
+  $("at-sub").textContent="input + output + cache writes — cache reads ("+fmtTokFull(t.cr)+") excluded, they bill ~10× cheaper";
+  $("at-span").textContent=a.first_ts?("since "+new Date(a.first_ts*1000).toLocaleDateString()):"";
+  $("at-stats").innerHTML=[["Input",t.in],["Output",t.out],["Cache write",t.cw],["Cache read",t.cr],["Messages",t.msgs]]
+    .map(s=>"<div class='stat'><div class='n'>"+fmtTokFull(s[1])+"</div><div class='k'>"+s[0]+"</div></div>").join("");
+  const mm=Math.max.apply(null,(a.by_model||[]).map(x=>x.tokens).concat([1]));
+  $("at-models").innerHTML=(a.by_model||[]).map(x=>atBar(x.name,x.tokens,mm,modelColor(x.name))).join("")||"<div class='sempty'>no data yet</div>";
+  const pm=Math.max.apply(null,(a.by_project||[]).map(x=>x.tokens).concat([1]));
+  $("at-projects").innerHTML=(a.by_project||[]).map(x=>atBar(x.name,x.tokens,pm,"#58a6ff")).join("")||"<div class='sempty'>no data yet</div>";
+  const more=(a.project_count||0)-((a.by_project||[]).length);
+  $("at-projmore").textContent=more>0?("+"+more+" more"):"";
+  ATDAILY=a.days;
+  if(!$("tab-alltime").hidden)renderDaily(ATDAILY);
+}
 async function refresh(){
   try{
     const d=await (await fetch("/api/usage",{cache:"no-store"})).json();
@@ -1295,16 +1559,24 @@ async function refresh(){
     renderExtra(d.extra);
     renderScoped(wins);
     renderSessions(d.sessions);
+    renderAlltime(d.alltime);
     tickCountdowns();
   }catch(e){ $("err").className="err show"; $("err").textContent="⚠ cannot reach the tracker service."; }
 }
 setInterval(tickCountdowns,1000);
 setInterval(refresh,5000);
 refresh();
-let _rz; window.addEventListener("resize",()=>{clearTimeout(_rz);_rz=setTimeout(()=>renderSpark(LASTH),120);});
+let _rz; window.addEventListener("resize",()=>{clearTimeout(_rz);_rz=setTimeout(()=>{renderSpark(LASTH); if(!$("tab-alltime").hidden)renderDaily(ATDAILY);},120);});
 document.querySelectorAll(".stab").forEach(b=>b.addEventListener("click",()=>{
   document.querySelectorAll(".stab").forEach(x=>x.classList.remove("on"));
   b.classList.add("on"); SMODE=b.dataset.m; renderSessions();
+}));
+document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{
+  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("on"));
+  b.classList.add("on");
+  const t=b.dataset.t;
+  $("tab-live").hidden=(t!=="live"); $("tab-alltime").hidden=(t!=="alltime");
+  if(t==="alltime")renderDaily(ATDAILY);   // SVG needs a visible layout to size correctly
 }));
 </script>
 </body>
@@ -1888,6 +2160,8 @@ class TrayApp:
         self._extra = getattr(self, "_extra", None)
         self._sessions = getattr(self, "_sessions", [])
         self._sessions_cache = getattr(self, "_sessions_cache", {})
+        self._alltime = getattr(self, "_alltime", {})
+        self._alltime_cache = getattr(self, "_alltime_cache", load_json(ALLTIME_PATH, {}))
         self._context = getattr(self, "_context", None)
         self._cwd = getattr(self, "_cwd", None)
         self._verdict = getattr(self, "_verdict", "")
@@ -1895,8 +2169,12 @@ class TrayApp:
         self._update_url = getattr(self, "_update_url", None)
         sessions_iv = int(self.cfg.get("sessions_interval_seconds", 45))
         sessions_top = int(self.cfg.get("sessions_top_n", 8))
+        alltime_iv = int(self.cfg.get("alltime_interval_seconds", 600))
+        alltime_top = int(self.cfg.get("alltime_top_n", 8))
+        alltime_days = int(self.cfg.get("alltime_days", 30))
         last_api = 0.0
         last_sessions = 0.0
+        last_alltime = 0.0
         last_update = 0.0
         warned_token = False
         while not self._stop.is_set():
@@ -1970,10 +2248,22 @@ class TrayApp:
                 snap["sessions"] = self._sessions
                 snap["context"] = self._context
                 snap["cwd"] = self._cwd
+                snap["alltime"] = self._alltime
                 self._verdict = (snap.get("verdict") or {}).get("text", "")
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
                 self._refresh_visual(r)
+                # Fold newly-written session bytes into lifetime totals. Runs after
+                # the live snapshot is published so the first (full-history) backfill
+                # never delays first paint; the result lands in the next snapshot.
+                if now - last_alltime >= alltime_iv:
+                    try:
+                        self._alltime = scan_all_time(self._alltime_cache, now,
+                                                      top_n=alltime_top, days=alltime_days)
+                        save_json(ALLTIME_PATH, self._alltime_cache)
+                    except Exception:
+                        log("all-time scan error:\n" + traceback.format_exc())
+                    last_alltime = now
             except Exception:
                 log("poll loop error:\n" + traceback.format_exc())
             self._wake.wait(timeout=ui_iv)

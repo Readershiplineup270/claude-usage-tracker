@@ -37,6 +37,11 @@ talks to nothing but that one Anthropic endpoint.
   read from your local Claude Code logs (token counts only, never content), with
   **Context % / Tokens** tabs and active indicators — see which terminal is burning
   your usage.
+- **All-time tokens** — a second dashboard tab with your lifetime totals
+  (input / output / cache write / cache read), a **by-model** and **by-project**
+  breakdown, and a **30-day daily-usage chart**. Folded incrementally from your local
+  logs (each file read once, then only new bytes), so it's accurate without rescanning
+  gigabytes; cache-reads are tallied separately since they bill ~10× cheaper.
 - **Proactive alerts + traffic-light verdict** — toasts when a window is on track to
   run out *before* it resets, when the active context hits 90% (time to `/compact`),
   or when overage credits near the cap; plus a one-glance **green / amber / red**
@@ -143,6 +148,7 @@ Edit `config.json` (created on first run, in the app's data dir), then restart:
 | `dashboard_port` | `8787` | Local dashboard port. |
 | `show_widget_on_start` | `true` | Show the mini widget at launch. |
 | `widget_width` / `widget_height` | `392` / `150` | Widget size in pixels. |
+| `alltime_days` | `30` | Days shown in the All-time daily-usage chart. |
 
 ## How it works
 

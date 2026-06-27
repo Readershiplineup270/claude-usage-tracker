@@ -100,3 +100,62 @@ def test_scan_sessions(tmp_path, monkeypatch):
     assert r["tokens"] == (1000 + 500 + 200) * 3        # cache_read excluded
     assert r["context_tokens"] == 1000 + 200 + 300000   # full last prompt
     assert 25 <= r["context_pct"] <= 35                 # 301200 / 1M -> ~30%
+
+
+def test_pretty_model():
+    assert m.pretty_model("claude-opus-4-8") == "Opus 4.8"
+    assert m.pretty_model("claude-fable-5") == "Fable 5"
+    assert m.pretty_model("claude-sonnet-4-6") == "Sonnet 4.6"
+    assert m.pretty_model("claude-haiku-4-5-20251001") == "Haiku 4.5"   # date suffix dropped
+    assert m.pretty_model("<synthetic>") == "Other"
+    assert m.pretty_model(None) == "Other"
+
+
+def test_scan_all_time(tmp_path, monkeypatch):
+    proj = tmp_path / "C--Dev-foo"
+    proj.mkdir()
+    lines = []
+    for i in range(2):                                   # 2 Opus messages
+        lines.append(json.dumps({
+            "timestamp": f"2026-06-26T12:00:0{i}.000Z", "cwd": r"C:\Dev\foo",
+            "message": {"model": "claude-opus-4-8", "usage": {
+                "input_tokens": 100, "output_tokens": 50,
+                "cache_creation_input_tokens": 10, "cache_read_input_tokens": 9000}}}))
+    lines.append(json.dumps({                            # 1 Fable message
+        "timestamp": "2026-06-26T13:00:00.000Z", "cwd": r"C:\Dev\foo",
+        "message": {"model": "claude-fable-5", "usage": {
+            "input_tokens": 200, "output_tokens": 30,
+            "cache_creation_input_tokens": 5, "cache_read_input_tokens": 1000}}}))
+    f = proj / "sess.jsonl"
+    f.write_text("\n".join(lines), encoding="utf-8")
+    monkeypatch.setattr(m, "PROJECTS_DIR", tmp_path)
+
+    # Pin "now" to the data's own day so the 30-day window deterministically covers it.
+    import datetime as _dt
+    now = _dt.datetime(2026, 6, 26, 18, 0, 0).timestamp()
+
+    cache = {}
+    a = m.scan_all_time(cache, now, days=30)
+    assert a["tokens"] == (100 + 50 + 10) * 2 + (200 + 30 + 5)   # cache reads excluded
+    assert a["total"]["cr"] == 9000 * 2 + 1000                   # tracked separately
+    assert a["total"]["msgs"] == 3
+    assert {r["name"] for r in a["by_model"]} == {"Opus 4.8", "Fable 5"}
+    assert a["by_project"][0]["name"] == "foo"
+    assert len(a["days"]) == 30                                  # zero-filled span
+    assert a["days"][-1]["d"] == "2026-06-26"                    # last day = today (pinned)
+    assert sum(d["tokens"] for d in a["days"]) == a["tokens"]    # all activity on one day
+
+    # Incremental: appending a line is folded in once (no re-read, no double count).
+    with open(f, "a", encoding="utf-8") as fh:
+        fh.write("\n" + json.dumps({
+            "timestamp": "2026-06-26T14:00:00.000Z", "cwd": r"C:\Dev\foo",
+            "message": {"model": "claude-opus-4-8", "usage": {
+                "input_tokens": 1, "output_tokens": 1,
+                "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}))
+    a2 = m.scan_all_time(cache, time.time())
+    assert a2["total"]["msgs"] == 4
+    assert a2["tokens"] == (100 + 50 + 10) * 2 + (200 + 30 + 5) + 2
+
+    # A second scan with no changes is a no-op (totals stable).
+    a3 = m.scan_all_time(cache, time.time())
+    assert a3["tokens"] == a2["tokens"] and a3["total"]["msgs"] == 4
