@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.19"
+__version__ = "0.1.20"
 
 
 def _data_dir() -> Path:
@@ -113,10 +113,10 @@ DEFAULT_CONFIG = {
     "widget_width": 392,
     "widget_height": 216,
     "show_bar_on_start": False,      # the minimal one-line HUD bar overlay
-    "bar_width": 360,
-    "bar_height": 40,
+    "bar_width": 340,
+    "bar_height": 30,
     "bar_fields": ["dir", "ctx", "5h", "7d"],   # which fields the HUD bar shows, in order
-    "bar_opacity": 62,                          # bar background opacity, 30-100 (%)
+    "bar_opacity": 85,                          # bar background opacity, 30-100 (%)
     "bar_show_refresh": "hover",                # "hover" | "always" | "never"
 }
 
@@ -1942,7 +1942,7 @@ WIDGET_HTML = r"""<!doctype html>
   .rz.se:hover::after{border-color:var(--dim)}
   /* ---- minimal "bar" kind (FPS-overlay style) ---- */
   body.kind-bar{flex-direction:row;align-items:center;gap:0;padding:5px 11px;
-    background:rgba(18,18,20,.62);border:1px solid rgba(255,255,255,.08);border-radius:9px}
+    background:rgba(18,18,20,.85);border:1px solid rgba(255,255,255,.08);border-radius:9px}
   body.kind-bar .top,body.kind-bar #body,body.kind-bar .acts{display:none}
   #bar{display:none}
   body.kind-bar #bar{display:flex;align-items:center;gap:14px;width:100%;overflow:hidden;
@@ -2017,12 +2017,23 @@ function curContext(d){         // context for the selected session, or the acti
 function pctOf(wins,key){ const w=(wins||[]).find(x=>x.key===key); return w?w.pct:null; }
 function bfld(label,pct){ return pct==null?"":"<span class='f'>"+label+" <b style='color:"+bandColor(pct)+"'>"+Math.round(pct)+"%</b></span>"; }
 function refreshNow2(){ fetch("/api/refresh",{method:"POST"}).catch(()=>{}); setTimeout(refresh,500); }
-function renderBar(d){           // minimal one-line HUD (dir + chosen percentages)
-  const wins=d.windows||[];
+function renderBar(d){           // minimal one-line HUD (configurable fields, in order)
+  const wins=d.windows||[], ui=d.ui||{};
+  const op=Math.max(30,Math.min(100, ui.bar_opacity!=null?ui.bar_opacity:85))/100;
+  document.body.style.background="rgba(18,18,20,"+op.toFixed(2)+")";   // consistent dark, adjustable
   if(!d.ok && !wins.length){ $("bar").innerHTML="<span class='f dir'>"+esc(d.error||"unavailable")+"</span>"; return; }
-  const cx=curContext(d), dir=SEL||actDir(d);
-  let html="<span class='f dir' title='"+esc(d.cwd||"")+"'>"+esc(dir)+"</span>";
-  html+=bfld("Ctx:",cx.pct)+bfld("5h:",pctOf(wins,"five_hour"))+bfld("7d:",pctOf(wins,"seven_day"));
+  const cx=curContext(d), dir=SEL||actDir(d), acc=d.account||{}, v=d.verdict;
+  const fields=(ui.bar_fields&&ui.bar_fields.length)?ui.bar_fields:["dir","ctx","5h","7d"];
+  const part=f=>{
+    if(f==="dir")    return "<span class='f dir' title='"+esc(d.cwd||"")+"'>"+esc(dir)+"</span>";
+    if(f==="acct")   return "<span class='f dir'>"+esc(acc.org||acc.name||(acc.email||"").split("@")[0]||"")+"</span>";
+    if(f==="ctx")    return bfld("Ctx:",cx.pct);
+    if(f==="5h")     return bfld("5h:",pctOf(wins,"five_hour"));
+    if(f==="7d"||f==="week") return bfld("7d:",pctOf(wins,"seven_day"));
+    if(f==="verdict")return v&&v.text?"<span class='f' style='color:"+v.color+"'>"+esc(v.text)+"</span>":"";
+    return "";
+  };
+  let html=fields.map(part).join("");
   html+="<span class='acts2'><span class='ic' onclick='refreshNow2()' title='Refresh'>↻</span>"+
         "<span class='ic' onclick='closeWidget()' title='Hide'>×</span></span>";
   $("bar").innerHTML=html;

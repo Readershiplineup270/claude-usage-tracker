@@ -69,14 +69,11 @@ talks to nothing but that one Anthropic endpoint.
 
 ### Colour scale
 
-Bars and gauges share one scale (low → high):
+Bars, gauges, and the tray icon share one muted scale:
 
-| Range | 0–20% | 20–60% | 60–80% | 80–90% | 90–99% | 100% |
-|-------|:-----:|:------:|:------:|:------:|:------:|:----:|
-| Colour | green | blue | orange | red | black | yellow |
-
-The 90–99% "black" band gets a red glow/outline so it reads as danger rather than
-empty.
+| Usage | under 60% | 60–80% | 80%+ |
+|-------|:---------:|:------:|:----:|
+| Colour | green | amber | red |
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/tray-icons.png" alt="Tray icon at various usage levels" width="560"><br>
@@ -120,9 +117,10 @@ After any of these, the mini widget appears top-right and a tray icon by the clo
 **To pin it to the taskbar** (Windows blocks apps from doing this themselves):
 right-click the running app's taskbar icon → *Pin to taskbar*.
 
-**Updating:** the app checks daily and shows an **Update to vX** item in the tray. For
-the installer build it downloads and runs the new Setup.exe for you (closes, upgrades,
-relaunches); pipx installs use `pipx upgrade claude-usage-tracker`.
+**Updating:** the app checks daily and surfaces an **Update** action (tray menu, and on
+the dashboard/widget). One click upgrades in place and restarts — the installer build
+runs the new Setup.exe, pip/pipx installs upgrade via the app's own Python, and a source
+checkout runs `git pull`. **Check for updates** is available any time too.
 
 ## Usage
 
@@ -132,9 +130,9 @@ Launch "Claude Usage Tracker" from the Start Menu/Desktop, or run it directly:
 .venv\Scripts\pythonw.exe claude_usage_tracker.py
 ```
 
-Tray menu: **Show/Hide widget**, **Open dashboard** (native window), **Open in
-browser**, **Refresh now**, open config/log, **Quit**. The widget has a `×` to hide
-it; drag it anywhere.
+Tray menu: **Show/Hide widget**, **Show/Hide minimal bar**, **Open dashboard**, **Open
+in browser**, **Refresh now**, **Check for updates**, **Sign in to Claude…**, open
+config/log, **Quit**. Overlays drag anywhere, resize from any edge, and have a `×` to hide.
 
 CLI:
 
@@ -142,6 +140,7 @@ CLI:
 .venv\Scripts\python.exe claude_usage_tracker.py --once          # print status once
 .venv\Scripts\python.exe claude_usage_tracker.py --once --debug  # + raw API JSON
 .venv\Scripts\pythonw.exe claude_usage_tracker.py --widget       # just the widget
+.venv\Scripts\pythonw.exe claude_usage_tracker.py --bar          # just the minimal HUD bar
 .venv\Scripts\pythonw.exe claude_usage_tracker.py --window       # just the dashboard window
 .venv\Scripts\python.exe claude_usage_tracker.py --uninstall-autostart
 ```
@@ -159,7 +158,10 @@ Edit `config.json` (created on first run, in the app's data dir), then restart:
 | `notify_on_start` | `true` | One summary toast at launch. |
 | `dashboard_port` | `8787` | Local dashboard port. |
 | `show_widget_on_start` | `true` | Show the mini widget at launch. |
-| `widget_width` / `widget_height` | `392` / `150` | Widget size in pixels. |
+| `widget_width` / `widget_height` | `392` / `216` | Widget size in pixels. |
+| `show_bar_on_start` | `false` | Show the minimal HUD bar at launch. |
+| `bar_fields` | `["dir","ctx","5h","7d"]` | HUD-bar fields, in order. |
+| `bar_opacity` | `85` | HUD-bar background opacity (30–100). |
 | `alltime_days` | `30` | Days shown in the All-time daily-usage chart. |
 
 ## How it works
