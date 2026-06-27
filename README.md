@@ -32,7 +32,7 @@ talks to nothing but that one Anthropic endpoint.
   weekly, **context %**) with Refresh / Check-for-updates buttons and a **dropdown** to pick
   which session's context to track; **and** a **minimal HUD bar** — a translucent, one-line,
   FPS-counter-style strip (`dir  Ctx: 45%  5h: 11%  7d: 3%`) whose controls appear on hover.
-  Toggle either from the tray; they can be shown together. Drag a corner to resize; size is remembered.
+  Toggle either from the tray; they can be shown together. Drag any edge or corner to resize; size is remembered.
 - **Full dashboard** — animated ring gauges, live reset countdowns, a **burn-rate /
   time-to-limit projection** ("≈7%/h · hits 100% in ~1h 10m"), a usage history
   sparkline, overage credits, and per-model (Opus/Sonnet) scoped weekly limits.

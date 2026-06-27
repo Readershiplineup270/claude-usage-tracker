@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.18"
+__version__ = "0.1.19"
 
 
 def _data_dir() -> Path:
@@ -115,6 +115,16 @@ DEFAULT_CONFIG = {
     "show_bar_on_start": False,      # the minimal one-line HUD bar overlay
     "bar_width": 360,
     "bar_height": 40,
+    "bar_fields": ["dir", "ctx", "5h", "7d"],   # which fields the HUD bar shows, in order
+    "bar_opacity": 62,                          # bar background opacity, 30-100 (%)
+    "bar_show_refresh": "hover",                # "hover" | "always" | "never"
+}
+
+# Settings the dashboard/settings UI may change at runtime (allowlist for POST /api/config).
+CONFIG_ALLOW = {
+    "show_widget_on_start", "show_bar_on_start", "bar_fields", "bar_opacity",
+    "bar_show_refresh", "widget_width", "widget_height", "bar_width", "bar_height",
+    "open_as_window", "predictive_alerts", "update_check",
 }
 
 LABELS = {
@@ -129,8 +139,9 @@ WINDOW_LEN = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
 _instance_guard = None   # holds the single-instance socket for the process lifetime
 STORE_LOCK = threading.Lock()
 STORE: dict = {"snapshot": {"ok": False, "error": "starting", "windows": []}}
-CONTROL: dict = {}   # {"refresh": fn, "check_update": fn} — wired by the running TrayApp
-                     # so the dashboard/widget can drive the poll loop over HTTP
+CONFIG_LOCK = threading.Lock()   # serialize config read-modify-write (tray is the only writer)
+CONTROL: dict = {}   # {"refresh","check_update","update","set_config","toggle_overlay"} — wired
+                     # by the running TrayApp so the dashboard/widget drive it over HTTP
 
 
 # ---------------------------------------------------------------------------
@@ -1916,10 +1927,19 @@ WIDGET_HTML = r"""<!doctype html>
   .btn:hover{color:var(--ink);border-color:rgba(255,255,255,.22)}
   .btn:active{transform:translateY(1px)} .btn:disabled{opacity:.7;cursor:default}
   .err{color:#e9b3a6;font:11px/1 var(--mono);padding:6px 2px}
-  .grip{position:fixed;right:0;bottom:0;width:18px;height:18px;border:0;background:transparent;cursor:nwse-resize;padding:0}
-  .grip::after{content:"";position:absolute;right:3px;bottom:3px;width:8px;height:8px;
+  /* all-edge resize zones (frameless windows have no OS resize border) */
+  .rz{position:fixed;z-index:50}
+  .rz.n{top:0;left:7px;right:7px;height:5px;cursor:ns-resize}
+  .rz.s{bottom:0;left:7px;right:7px;height:5px;cursor:ns-resize}
+  .rz.e{right:0;top:7px;bottom:7px;width:5px;cursor:ew-resize}
+  .rz.w{left:0;top:7px;bottom:7px;width:5px;cursor:ew-resize}
+  .rz.ne{top:0;right:0;width:10px;height:10px;cursor:nesw-resize}
+  .rz.sw{bottom:0;left:0;width:10px;height:10px;cursor:nesw-resize}
+  .rz.nw{top:0;left:0;width:10px;height:10px;cursor:nwse-resize}
+  .rz.se{bottom:0;right:0;width:13px;height:13px;cursor:nwse-resize}
+  .rz.se::after{content:"";position:absolute;right:3px;bottom:3px;width:7px;height:7px;
     border-right:2px solid var(--faint);border-bottom:2px solid var(--faint)}
-  .grip:hover::after{border-color:var(--dim)}
+  .rz.se:hover::after{border-color:var(--dim)}
   /* ---- minimal "bar" kind (FPS-overlay style) ---- */
   body.kind-bar{flex-direction:row;align-items:center;gap:0;padding:5px 11px;
     background:rgba(18,18,20,.62);border:1px solid rgba(255,255,255,.08);border-radius:9px}
@@ -1951,7 +1971,8 @@ WIDGET_HTML = r"""<!doctype html>
     <button class="btn" id="w-check" onclick="checkUpd()">Check for updates</button>
   </div>
   <div id="bar"></div>
-  <button class="grip" id="grip" title="Drag to resize"></button>
+  <div class="rz n"></div><div class="rz s"></div><div class="rz e"></div><div class="rz w"></div>
+  <div class="rz ne"></div><div class="rz nw"></div><div class="rz sw"></div><div class="rz se" title="Drag to resize"></div>
 <script>
 const $=id=>document.getElementById(id);
 let R={};
@@ -2030,15 +2051,25 @@ async function refresh(){ try{
   } else { $("bc").style.width="0%"; $("pcc").textContent="–"; $("pcc").style.color=""; $("cdc").textContent=""; }
   tick();
 }catch(e){ if(KIND!=="bar"){ $("dot").style.background="#cda24e"; } } }
-(function(){ const g=$("grip"); if(!g)return; let sx,sy,sw,sh,on=false;
-  g.addEventListener("mousedown",e=>{ e.stopPropagation(); e.preventDefault(); });  // don't let easy_drag move the window
-  g.addEventListener("pointerdown",e=>{ on=true; sx=e.screenX; sy=e.screenY; sw=window.innerWidth; sh=window.innerHeight;
-    try{g.setPointerCapture(e.pointerId);}catch(_){} e.preventDefault(); e.stopPropagation(); });
-  g.addEventListener("pointermove",e=>{ if(!on)return;
-    const W=Math.max(280,Math.round(sw+(e.screenX-sx))), H=Math.max(150,Math.round(sh+(e.screenY-sy)));
-    try{ window.pywebview.api.resize(W,H); }catch(_){} });
-  g.addEventListener("pointerup",e=>{ if(!on)return; on=false; try{g.releasePointerCapture(e.pointerId);}catch(_){}
-    try{ window.pywebview.api.save_size(window.innerWidth,window.innerHeight); }catch(_){} });
+(function(){   // resize from any edge/corner; anchor the opposite side via FixPoint
+  const MINW=KIND==="bar"?200:280, MINH=KIND==="bar"?30:150;
+  let cur=null,sx,sy,sw,sh;
+  function move(e){ if(!cur)return;
+    const dx=e.screenX-sx, dy=e.screenY-sy; let W=sw,H=sh;
+    if(cur.indexOf("e")>=0)W=sw+dx; if(cur.indexOf("w")>=0)W=sw-dx;
+    if(cur.indexOf("s")>=0)H=sh+dy; if(cur.indexOf("n")>=0)H=sh-dy;
+    W=Math.max(MINW,Math.round(W)); H=Math.max(MINH,Math.round(H));
+    try{ window.pywebview.api.resize_fix(W,H,cur); }catch(_){}
+  }
+  document.querySelectorAll(".rz").forEach(z=>{
+    const k=[...z.classList].filter(c=>c!=="rz")[0];
+    z.addEventListener("mousedown",e=>{ e.stopPropagation(); e.preventDefault(); });  // beat easy_drag
+    z.addEventListener("pointerdown",e=>{ cur=k; sx=e.screenX; sy=e.screenY; sw=window.innerWidth; sh=window.innerHeight;
+      try{z.setPointerCapture(e.pointerId);}catch(_){} e.preventDefault(); e.stopPropagation(); });
+    z.addEventListener("pointermove",move);
+    z.addEventListener("pointerup",e=>{ if(!cur)return; cur=null; try{z.releasePointerCapture(e.pointerId);}catch(_){}
+      try{ window.pywebview.api.save_size(window.innerWidth,window.innerHeight); }catch(_){} });
+  });
 })();
 $("tier").addEventListener("change",function(){ SEL=this.value; try{localStorage.setItem("trackSel",SEL);}catch(_){} refresh(); });
 setInterval(tick,1000); setInterval(refresh,5000); refresh();
@@ -2063,6 +2094,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except Exception:
             pass
+
+    def _read_json(self):
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            if n <= 0 or n > 100_000:
+                return None
+            return json.loads(self.rfile.read(n).decode("utf-8"))
+        except Exception:
+            return None
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
@@ -2104,6 +2144,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception:
                 res = {"update": False, "current": __version__, "latest": None}
             self._send(200, "application/json", json.dumps(res).encode("utf-8"))
+        elif path == "/api/config":
+            patch = self._read_json()
+            fn = CONTROL.get("set_config")
+            if fn and isinstance(patch, dict):
+                try:
+                    fn(patch)
+                except Exception:
+                    pass
+            self._send(200, "application/json", b'{"ok":true}')
+        elif path == "/api/overlay":
+            oid = (self._read_json() or {}).get("id", "")
+            fn = CONTROL.get("toggle_overlay")
+            if fn and oid in ("widget", "bar"):
+                try:
+                    fn(oid)
+                except Exception:
+                    pass
+            self._send(200, "application/json", b'{"ok":true}')
         else:
             self._send(404, "text/plain", b"not found")
 
@@ -2286,22 +2344,39 @@ def run_overlay(port: int, kind: str = "panel") -> int:
                     except Exception:
                         pass
 
-            def resize(self, w, h):     # called by the corner grip (frameless has no OS edges)
+            def resize(self, w, h):
                 try:
                     webview.windows[0].resize(int(w), int(h))
                 except Exception:
                     pass
 
-            def save_size(self, w, h):  # remember the chosen size for next launch
+            def resize_fix(self, w, h, edge):  # resize from any edge: anchor the opposite side
                 try:
-                    c = load_config()
-                    if bar:
-                        c["bar_width"], c["bar_height"] = max(200, int(w)), max(30, int(h))
-                    else:
-                        c["widget_width"], c["widget_height"] = max(280, int(w)), max(150, int(h))
-                    save_json(CONFIG_PATH, c)
+                    from webview.window import FixPoint as F
+                    keep = {"n": F.SOUTH, "s": F.NORTH, "e": F.WEST, "w": F.EAST,
+                            "se": F.NORTH | F.WEST, "sw": F.NORTH | F.EAST,
+                            "ne": F.SOUTH | F.WEST, "nw": F.SOUTH | F.EAST}.get(edge, F.NORTH | F.WEST)
+                    webview.windows[0].resize(int(w), int(h), fix_point=keep)
                 except Exception:
-                    pass
+                    try:
+                        webview.windows[0].resize(int(w), int(h))
+                    except Exception:
+                        pass
+
+            def save_size(self, w, h):  # remember size via the tray (single config writer)
+                kw, kh = ("bar_width", "bar_height") if bar else ("widget_width", "widget_height")
+                lo = (200, 30) if bar else (280, 150)
+                patch = {kw: max(lo[0], int(w)), kh: max(lo[1], int(h))}
+                try:
+                    urllib.request.urlopen(urllib.request.Request(
+                        f"http://127.0.0.1:{port}/api/config",
+                        data=json.dumps(patch).encode("utf-8"), method="POST",
+                        headers={"Content-Type": "application/json"}), timeout=3).read()
+                except Exception:
+                    try:
+                        c = load_config(); c.update(patch); save_json(CONFIG_PATH, c)
+                    except Exception:
+                        pass
 
         kw = dict(width=w, height=h, resizable=True, min_size=minsz,
                   frameless=True, easy_drag=True, on_top=True, js_api=Api(), **pos)
@@ -2493,6 +2568,7 @@ class TrayApp:
         self.port = int(cfg.get("dashboard_port", 8787))
         self.widget_proc = None
         self.bar_proc = None
+        self._config_epoch = 0
         self._update_available = None
         self._update_url = None
         self._verdict = ""
@@ -2541,6 +2617,8 @@ class TrayApp:
         CONTROL["refresh"] = self._wake.set            # let the dashboard/widget re-poll
         CONTROL["check_update"] = self._check_update_now
         CONTROL["update"] = lambda: threading.Thread(target=self._do_update, daemon=True).start()
+        CONTROL["set_config"] = self._set_config       # the tray is the single config writer
+        CONTROL["toggle_overlay"] = self._toggle_overlay
         threading.Thread(target=self._poll_loop, daemon=True).start()
         if self.cfg.get("show_widget_on_start", True):
             self.widget_proc = self._spawn_mode("--widget")
@@ -2573,8 +2651,10 @@ class TrayApp:
                 self.widget_proc.terminate()
             except Exception:
                 pass
+            self.widget_proc = None        # reflect "hidden" immediately (poll() lags terminate)
         else:
             self.widget_proc = self._spawn_mode("--widget")
+        self._refresh_menu(icon)
 
     def _bar_alive(self) -> bool:
         return self.bar_proc is not None and self.bar_proc.poll() is None
@@ -2585,8 +2665,39 @@ class TrayApp:
                 self.bar_proc.terminate()
             except Exception:
                 pass
+            self.bar_proc = None
         else:
             self.bar_proc = self._spawn_mode("--bar")
+        self._refresh_menu(icon)
+
+    def _refresh_menu(self, icon=None):
+        try:
+            (icon or self.icon).update_menu()    # re-evaluate dynamic item labels now
+        except Exception:
+            pass
+
+    def _toggle_overlay(self, oid):
+        (self._on_toggle_bar if oid == "bar" else self._on_toggle_widget)(None, None)
+        try:
+            if self.icon:
+                self.icon.update_menu()
+        except Exception:
+            pass
+
+    def _set_config(self, patch: dict):
+        """Single config writer: merge an allowlisted patch into the live cfg, persist
+        once, and bump the epoch so overlays know to re-read."""
+        if not isinstance(patch, dict):
+            return
+        with CONFIG_LOCK:
+            for k, v in patch.items():
+                if k in CONFIG_ALLOW:
+                    self.cfg[k] = v
+            try:
+                save_json(CONFIG_PATH, self.cfg)
+            except Exception as exc:
+                log(f"config save failed: {exc}")
+            self._config_epoch += 1
 
     # menu handlers
     def _on_open(self, icon, item):
@@ -2627,12 +2738,31 @@ class TrayApp:
         """Upgrade an installed (pipx/pip) copy in place using our OWN interpreter —
         no reliance on a `pipx` command being on PATH — then relaunch. Source checkouts
         are git-managed, so we just point those at the releases page."""
+        NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         if not _is_installed_pkg():
+            # Source checkout: update in place with `git pull` if it's a git repo.
+            here = Path(__file__).resolve().parent
+            if (here / ".git").exists():
+                notify(APP_NAME, "Updating (git pull)…")
+                try:
+                    r = subprocess.run(["git", "-C", str(here), "pull", "--ff-only"],
+                                       capture_output=True, text=True, timeout=120, creationflags=NO_WIN)
+                    out = (r.stdout + r.stderr).lower()
+                    if r.returncode == 0 and "up to date" not in out:
+                        notify(APP_NAME, "Updated — restarting…")
+                        self._relaunch_detached()
+                        self._on_quit(self.icon, None)
+                        return
+                    if r.returncode == 0:
+                        notify(APP_NAME, "Already up to date.")
+                        return
+                    log("git pull failed:\n" + r.stdout + r.stderr)
+                except Exception as exc:
+                    log(f"git pull error: {exc}")
             webbrowser.open(RELEASES_URL)
-            notify("Update", "Running from source — `git pull` to update (or install via pipx / Setup.exe).")
+            notify("Update", "Couldn't auto-update this checkout — `git pull` in a terminal.")
             return
         notify(APP_NAME, f"Updating to v{self._update_available}…")
-        NO_WIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
             # sys.executable is the app's venv python (works for pipx and pip installs).
             r = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "claude-usage-tracker"],
@@ -2837,6 +2967,11 @@ class TrayApp:
                 snap["cwd"] = self._cwd
                 snap["alltime"] = self._alltime
                 snap["update"] = {"available": self._update_available, "url": self._update_url}
+                snap["ui"] = {k: self.cfg.get(k) for k in
+                              ("bar_fields", "bar_opacity", "bar_show_refresh",
+                               "show_widget_on_start", "show_bar_on_start")}
+                snap["config_epoch"] = self._config_epoch
+                snap["overlays_alive"] = {"widget": self._widget_alive(), "bar": self._bar_alive()}
                 self._verdict = (snap.get("verdict") or {}).get("text", "")
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
