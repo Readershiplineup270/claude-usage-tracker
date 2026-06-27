@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.20"
+__version__ = "0.1.21"
 
 
 def _data_dir() -> Path:
@@ -1927,19 +1927,6 @@ WIDGET_HTML = r"""<!doctype html>
   .btn:hover{color:var(--ink);border-color:rgba(255,255,255,.22)}
   .btn:active{transform:translateY(1px)} .btn:disabled{opacity:.7;cursor:default}
   .err{color:#e9b3a6;font:11px/1 var(--mono);padding:6px 2px}
-  /* all-edge resize zones (frameless windows have no OS resize border) */
-  .rz{position:fixed;z-index:50}
-  .rz.n{top:0;left:7px;right:7px;height:5px;cursor:ns-resize}
-  .rz.s{bottom:0;left:7px;right:7px;height:5px;cursor:ns-resize}
-  .rz.e{right:0;top:7px;bottom:7px;width:5px;cursor:ew-resize}
-  .rz.w{left:0;top:7px;bottom:7px;width:5px;cursor:ew-resize}
-  .rz.ne{top:0;right:0;width:10px;height:10px;cursor:nesw-resize}
-  .rz.sw{bottom:0;left:0;width:10px;height:10px;cursor:nesw-resize}
-  .rz.nw{top:0;left:0;width:10px;height:10px;cursor:nwse-resize}
-  .rz.se{bottom:0;right:0;width:13px;height:13px;cursor:nwse-resize}
-  .rz.se::after{content:"";position:absolute;right:3px;bottom:3px;width:7px;height:7px;
-    border-right:2px solid var(--faint);border-bottom:2px solid var(--faint)}
-  .rz.se:hover::after{border-color:var(--dim)}
   /* ---- minimal "bar" kind (FPS-overlay style) ---- */
   body.kind-bar{flex-direction:row;align-items:center;gap:0;padding:5px 11px;
     background:rgba(18,18,20,.85);border:1px solid rgba(255,255,255,.08);border-radius:9px}
@@ -1971,8 +1958,6 @@ WIDGET_HTML = r"""<!doctype html>
     <button class="btn" id="w-check" onclick="checkUpd()">Check for updates</button>
   </div>
   <div id="bar"></div>
-  <div class="rz n"></div><div class="rz s"></div><div class="rz e"></div><div class="rz w"></div>
-  <div class="rz ne"></div><div class="rz nw"></div><div class="rz sw"></div><div class="rz se" title="Drag to resize"></div>
 <script>
 const $=id=>document.getElementById(id);
 let R={};
@@ -2062,26 +2047,7 @@ async function refresh(){ try{
   } else { $("bc").style.width="0%"; $("pcc").textContent="–"; $("pcc").style.color=""; $("cdc").textContent=""; }
   tick();
 }catch(e){ if(KIND!=="bar"){ $("dot").style.background="#cda24e"; } } }
-(function(){   // resize from any edge/corner; anchor the opposite side via FixPoint
-  const MINW=KIND==="bar"?200:280, MINH=KIND==="bar"?30:150;
-  let cur=null,sx,sy,sw,sh;
-  function move(e){ if(!cur)return;
-    const dx=e.screenX-sx, dy=e.screenY-sy; let W=sw,H=sh;
-    if(cur.indexOf("e")>=0)W=sw+dx; if(cur.indexOf("w")>=0)W=sw-dx;
-    if(cur.indexOf("s")>=0)H=sh+dy; if(cur.indexOf("n")>=0)H=sh-dy;
-    W=Math.max(MINW,Math.round(W)); H=Math.max(MINH,Math.round(H));
-    try{ window.pywebview.api.resize_fix(W,H,cur); }catch(_){}
-  }
-  document.querySelectorAll(".rz").forEach(z=>{
-    const k=[...z.classList].filter(c=>c!=="rz")[0];
-    z.addEventListener("mousedown",e=>{ e.stopPropagation(); e.preventDefault(); });  // beat easy_drag
-    z.addEventListener("pointerdown",e=>{ cur=k; sx=e.screenX; sy=e.screenY; sw=window.innerWidth; sh=window.innerHeight;
-      try{z.setPointerCapture(e.pointerId);}catch(_){} e.preventDefault(); e.stopPropagation(); });
-    z.addEventListener("pointermove",move);
-    z.addEventListener("pointerup",e=>{ if(!cur)return; cur=null; try{z.releasePointerCapture(e.pointerId);}catch(_){}
-      try{ window.pywebview.api.save_size(window.innerWidth,window.innerHeight); }catch(_){} });
-  });
-})();
+// Resize is handled natively by the OS (WS_THICKFRAME) — no JS resize math (DPI-safe).
 $("tier").addEventListener("change",function(){ SEL=this.value; try{localStorage.setItem("trackSel",SEL);}catch(_){} refresh(); });
 setInterval(tick,1000); setInterval(refresh,5000); refresh();
 </script>
@@ -2258,6 +2224,8 @@ def set_window_icon(ico_path, toolwindow=False) -> bool:
         pid = k32.GetCurrentProcessId()
         WM_SETICON, GW_OWNER, GCLP_HICON, GCLP_HICONSM = 0x80, 4, -14, -34
         GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW = -20, 0x80, 0x40000
+        GWL_STYLE, WS_THICKFRAME = -16, 0x00040000
+        SWP_FRAMECHANGED = 0x0001 | 0x0002 | 0x0004 | 0x0020   # NOSIZE|NOMOVE|NOZORDER|FRAMECHANGED
         found = []
         proto = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
 
@@ -2274,6 +2242,9 @@ def set_window_icon(ico_path, toolwindow=False) -> bool:
                 if toolwindow:
                     ex = getl(hwnd, GWL_EXSTYLE)
                     setl(hwnd, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW)
+                    st = getl(hwnd, GWL_STYLE)
+                    setl(hwnd, GWL_STYLE, st | WS_THICKFRAME)   # native, DPI-correct edge resize
+                    u32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_FRAMECHANGED)
                     u32.ShowWindow(hwnd, 0)   # SW_HIDE — required for the taskbar to drop it
                     u32.ShowWindow(hwnd, 5)   # SW_SHOW
                 found.append(hwnd)
@@ -2389,13 +2360,29 @@ def run_overlay(port: int, kind: str = "panel") -> int:
                     except Exception:
                         pass
 
+        api = Api()
         kw = dict(width=w, height=h, resizable=True, min_size=minsz,
-                  frameless=True, easy_drag=True, on_top=True, js_api=Api(), **pos)
+                  frameless=True, easy_drag=True, on_top=True, js_api=api, **pos)
         if bar:
             kw["transparent"] = True            # see-through HUD; CSS paints a translucent panel
         else:
             kw["background_color"] = "#141416"
-        webview.create_window(APP_NAME, url, **kw)
+        window = webview.create_window(APP_NAME, url, **kw)
+        # native resize (WS_THICKFRAME) doesn't call JS — persist the size from the resized event
+        _rt = {"t": None}
+        def _on_resized(*_a):
+            try:
+                if _rt["t"]:
+                    _rt["t"].cancel()
+            except Exception:
+                pass
+            _rt["t"] = threading.Timer(0.7, lambda: api.save_size(window.width, window.height))
+            _rt["t"].daemon = True
+            _rt["t"].start()
+        try:
+            window.events.resized += _on_resized
+        except Exception:
+            pass
         threading.Thread(target=_apply_window_icon, args=(True,), daemon=True).start()
         webview.start(icon=str(ICO_PATH))
     except Exception as exc:
