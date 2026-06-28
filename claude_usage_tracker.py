@@ -78,6 +78,7 @@ PROJECTS_DIR = Path(os.path.expanduser("~")) / ".claude" / "projects"
 LOG_PATH = APP_DIR / "claude_usage_tracker.log"
 ICON_PATH = APP_DIR / "app_icon.png"
 ICO_PATH = APP_DIR / "app.ico"
+REMOTE_PATH = APP_DIR / "remote.json"   # remote-sync identity (accountId/readToken/e2eeKey) — secrets, opt-in
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
@@ -122,6 +123,9 @@ DEFAULT_CONFIG = {
     "status_check": True,                       # poll status.anthropic.com
     "status_interval_seconds": 300,
     "status_components": [],                    # component names to watch ([] = overall status)
+    "remote_enabled": False,                    # opt-in: relay an E2EE snapshot to your phone
+    "remote_relay_url": "",                     # your Cloudflare Worker relay URL (see docs/REMOTE.md)
+    "remote_sync_seconds": 60,                  # how often to push the snapshot to the relay
 }
 
 # Settings the dashboard/settings UI may change at runtime (allowlist for POST /api/config).
@@ -129,7 +133,7 @@ CONFIG_ALLOW = {
     "show_widget_on_start", "show_bar_on_start", "bar_fields", "bar_opacity",
     "bar_show_refresh", "widget_width", "widget_height", "bar_width", "bar_height",
     "open_as_window", "predictive_alerts", "update_check", "danger_alerts",
-    "status_check", "status_components",
+    "status_check", "status_components", "remote_enabled", "remote_relay_url",
 }
 
 LABELS = {
@@ -145,8 +149,9 @@ _instance_guard = None   # holds the single-instance socket for the process life
 STORE_LOCK = threading.Lock()
 STORE: dict = {"snapshot": {"ok": False, "error": "starting", "windows": []}}
 CONFIG_LOCK = threading.Lock()   # serialize config read-modify-write (tray is the only writer)
-CONTROL: dict = {}   # {"refresh","check_update","update","set_config","toggle_overlay"} — wired
-                     # by the running TrayApp so the dashboard/widget drive it over HTTP
+CONTROL: dict = {}   # {"refresh","check_update","update","set_config","toggle_overlay","remote_action"}
+                     # — wired by the running TrayApp so the dashboard/widget drive it over HTTP
+REMOTE_PUSH = None   # optional callable(title, msg) set by TrayApp to mirror toasts to the phone
 
 
 # ---------------------------------------------------------------------------
@@ -1230,6 +1235,158 @@ def ensure_app_icon() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Remote sync (optional, opt-in, end-to-end encrypted) — see docs/REMOTE.md
+#
+# The desktop is the only producer. It encrypts the snapshot with a key the relay
+# never sees (libsodium secretbox), PUTs the ciphertext to the relay, and the phone
+# fetches + decrypts it. Pairing ships the key to the phone via a QR code shown on
+# the (localhost-only) dashboard. All of this no-ops gracefully if `pynacl` isn't
+# installed or the feature is disabled, so the core app never depends on it.
+# ---------------------------------------------------------------------------
+
+_remote_id_cache = None
+
+
+def remote_available() -> bool:
+    """True if the optional crypto dep (pynacl) is importable."""
+    return importlib.util.find_spec("nacl") is not None
+
+
+def _b64u(b: bytes) -> str:
+    import base64
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+
+def load_remote_identity(create: bool = False):
+    """{account_id, read_token, e2ee_key(b64)} from remote.json. Generates and persists
+    it when create=True (and pynacl is available). Returns None otherwise."""
+    global _remote_id_cache
+    if _remote_id_cache is not None:
+        return _remote_id_cache
+    data = load_json(REMOTE_PATH, None)
+    if isinstance(data, dict) and data.get("account_id") and data.get("read_token") and data.get("e2ee_key"):
+        _remote_id_cache = data
+        return data
+    if not create or not remote_available():
+        return None
+    import os
+    import base64
+    ident = {"v": 1, "account_id": _b64u(os.urandom(16)),
+             "read_token": _b64u(os.urandom(32)),
+             "e2ee_key": base64.b64encode(os.urandom(32)).decode()}
+    save_json(REMOTE_PATH, ident)
+    _remote_id_cache = ident
+    log("remote: generated a new pairing identity")
+    return ident
+
+
+def rotate_remote_identity():
+    """Mint a fresh identity (new read_token + e2ee_key). Old relay data becomes
+    unreadable and the phone must re-pair."""
+    global _remote_id_cache
+    _remote_id_cache = None
+    try:
+        REMOTE_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return load_remote_identity(create=True)
+
+
+def unpair_remote() -> None:
+    """Forget the local identity. Relayed ciphertext expires on the relay's TTL."""
+    global _remote_id_cache
+    _remote_id_cache = None
+    try:
+        REMOTE_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def remote_encrypt(obj):
+    """Return the wire blob {v, nonce, ct, ts} for `obj`, or None if unavailable."""
+    import base64
+    from nacl.secret import SecretBox
+    from nacl.utils import random as nrandom
+    ident = load_remote_identity(create=True)
+    if not ident:
+        return None
+    box = SecretBox(base64.b64decode(ident["e2ee_key"]))
+    enc = box.encrypt(json.dumps(obj).encode("utf-8"), nrandom(SecretBox.NONCE_SIZE))
+    return {"v": 1, "nonce": base64.b64encode(enc.nonce).decode(),
+            "ct": base64.b64encode(enc.ciphertext).decode(), "ts": int(time.time())}
+
+
+def remote_pair_uri(cfg: dict):
+    """`cutpair1:<base64url(json{u,a,t,k})>` — the QR payload the phone scans."""
+    import base64
+    ident = load_remote_identity(create=True)
+    url = (cfg.get("remote_relay_url") or "").rstrip("/")
+    if not ident or not url:
+        return None
+    payload = {"u": url, "a": ident["account_id"], "t": ident["read_token"], "k": ident["e2ee_key"]}
+    raw = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    return "cutpair1:" + raw
+
+
+def remote_pair_qr_png(cfg: dict):
+    """PNG bytes of the pairing QR, or None."""
+    uri = remote_pair_uri(cfg)
+    if not uri:
+        return None
+    try:
+        import io
+        import qrcode
+        buf = io.BytesIO()
+        qrcode.make(uri).save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as exc:
+        log(f"remote: pair QR failed: {exc}")
+        return None
+
+
+def _relay_call(method: str, cfg: dict, path: str, body=None, timeout: int = 8):
+    """Authenticated relay request. Returns the HTTP status code, or None on error."""
+    url = (cfg.get("remote_relay_url") or "").rstrip("/")
+    ident = load_remote_identity(create=False)
+    if not url or not ident:
+        return None
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url + path, data=data, method=method)
+    req.add_header("Authorization", "Bearer " + ident["read_token"])
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception as exc:
+        log(f"remote: {method} {path} failed: {exc}")
+        return None
+
+
+def remote_sync_snapshot(snap: dict, cfg: dict) -> bool:
+    """Encrypt + PUT the snapshot to the relay. Returns True on 204."""
+    ident = load_remote_identity(create=False)
+    if not ident:
+        return False
+    blob = remote_encrypt(snap)
+    if not blob:
+        return False
+    return _relay_call("PUT", cfg, f"/v1/acct/{ident['account_id']}/snapshot", blob) == 204
+
+
+def remote_push(cfg: dict, title: str, body: str, tag: str = "") -> None:
+    """Encrypt + POST a push payload; the relay fans it out via FCM (E2EE)."""
+    ident = load_remote_identity(create=False)
+    if not ident:
+        return
+    blob = remote_encrypt({"title": title, "body": body, "tag": tag})
+    if blob:
+        _relay_call("POST", cfg, f"/v1/acct/{ident['account_id']}/push", blob)
+
+
+# ---------------------------------------------------------------------------
 # Notifications
 # ---------------------------------------------------------------------------
 
@@ -1247,6 +1404,11 @@ def notify(title: str, msg: str, duration: str = "short") -> None:
         toast.show()
     except Exception as exc:
         log(f"toast failed: {exc}")
+    try:
+        if REMOTE_PUSH:
+            REMOTE_PUSH(title, msg)        # mirror the toast to the paired phone (if enabled)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1699,6 +1861,26 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="csub" style="margin-top:8px">None selected = overall status. Shown on the dashboard, widget, and bar.</div>
     </div>
     <div class="card panel">
+      <div class="ptitle"><span>Remote (phone) · Android</span><span class="legend" id="rm-state"></span></div>
+      <div id="rm-unavail" class="csub" hidden>Install the optional dependency first: <code>pip install "claude-usage-tracker[remote]"</code></div>
+      <div class="setrow"><span class="setlbl">Enable</span>
+        <label class="chk"><input type="checkbox" id="rm-enabled"> relay an end-to-end-encrypted snapshot to your phone</label></div>
+      <div class="setrow"><span class="setlbl">Relay URL</span>
+        <input type="text" id="rm-url" placeholder="https://your-worker.workers.dev" spellcheck="false"
+          style="flex:1;min-width:220px;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:7px;padding:8px 10px;font:12px/1 var(--mono)">
+        <button class="sbtn" id="rm-save">Save</button></div>
+      <div id="rm-pairwrap" hidden>
+        <div class="csub" style="margin:6px 0 10px">Scan with the Android app to pair. The QR contains your encryption key — keep it private.</div>
+        <img id="rm-qr" alt="pairing QR" width="200" height="200" style="background:#fff;border-radius:10px;padding:8px;image-rendering:pixelated">
+        <div class="setacts" style="margin-top:12px">
+          <button class="sbtn" id="rm-sync">Sync now</button>
+          <button class="sbtn" id="rm-rotate">Rotate key</button>
+          <button class="sbtn" id="rm-unpair">Unpair</button>
+        </div>
+      </div>
+      <div class="csub" style="margin-top:8px">Android only (no iOS yet). The relay only stores ciphertext it can't read. See <code>docs/REMOTE.md</code>.</div>
+    </div>
+    <div class="card panel">
       <div class="ptitle">Actions</div>
       <div class="setacts">
         <button class="sbtn" id="set-refresh">Refresh now</button>
@@ -1924,6 +2106,18 @@ let LASTD={};
 const BARFIELDS=[["dir","Directory"],["acct","Account"],["ctx","Context %"],["5h","5-hour %"],["7d","Weekly %"],["verdict","Verdict"],["status","Anthropic status"]];
 async function postCfg(patch){ try{ await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)}); }catch(e){} }
 async function postOverlay(id){ try{ await fetch("/api/overlay",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})}); }catch(e){} }
+async function postRemote(action){ try{ await fetch("/api/remote",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action})}); }catch(e){} }
+function renderRemote(){
+  const r=LASTD.remote||{}; const avail=r.available!==false;
+  const un=$("rm-unavail"); if(un) un.hidden=avail;
+  $("rm-enabled").checked=!!r.enabled; $("rm-enabled").disabled=!avail;
+  if(document.activeElement!==$("rm-url")) $("rm-url").value=r.relay_url||"";
+  const paired=!!(r.enabled && r.relay_url && avail);
+  $("rm-pairwrap").hidden=!paired;
+  if(paired && $("rm-qr").dataset.url!==r.relay_url){ $("rm-qr").dataset.url=r.relay_url; $("rm-qr").src="/api/pair-qr?ts="+Date.now(); }
+  const st=$("rm-state");
+  if(st) st.textContent = !avail ? "unavailable" : (r.enabled ? (r.last_sync_ok===true?"synced":(r.last_sync_ok===false?"sync error":"on")) : "off");
+}
 function syncOverlayLabels(){
   const a=LASTD.overlays_alive||{};
   const b=$("set-toggle-bar"), w=$("set-toggle-widget");
@@ -1943,6 +2137,7 @@ function renderSettings(){
   }));
   syncOverlayLabels();
   renderStatusPicker();
+  renderRemote();
 }
 const COMP_RANK={operational:0,under_maintenance:1,degraded_performance:2,partial_outage:3,major_outage:4};
 const IND_SEV={none:0,minor:2,major:4,critical:4};
@@ -2079,6 +2274,11 @@ $("set-toggle-widget").onclick=function(){ const sh=this.textContent==="Hide"; t
 $("set-bar-start").onchange=function(){ postCfg({show_bar_on_start:this.checked}); };
 $("set-widget-start").onchange=function(){ postCfg({show_widget_on_start:this.checked}); };
 $("set-refresh").onclick=doRefresh; $("set-check").onclick=doCheckUpdate; $("set-login").onclick=doSignin;
+$("rm-enabled").onchange=function(){ postCfg({remote_enabled:this.checked}); setTimeout(refresh,300); };
+$("rm-save").onclick=function(){ postCfg({remote_relay_url:$("rm-url").value.trim()}); $("rm-qr").dataset.url=""; setTimeout(refresh,400); };
+$("rm-sync").onclick=function(){ postRemote("sync"); setTimeout(refresh,500); };
+$("rm-rotate").onclick=function(){ if(confirm("Rotate the key? Your phone must re-pair.")){ postRemote("rotate"); $("rm-qr").dataset.url=""; setTimeout(refresh,500); } };
+$("rm-unpair").onclick=function(){ if(confirm("Unpair and disable remote sync?")){ postRemote("unpair"); setTimeout(refresh,500); } };
 </script>
 </body>
 </html>"""
@@ -2315,6 +2515,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             with STORE_LOCK:
                 snap = STORE.get("snapshot", {})
             self._send(200, "application/json", json.dumps(snap).encode("utf-8"))
+        elif path == "/api/pair-qr":
+            png = remote_pair_qr_png(load_config())
+            if png:
+                self._send(200, "image/png", png)
+            else:
+                self._send(404, "text/plain", b"pairing unavailable")
         elif path == "/favicon.ico":
             self._send(204, "image/x-icon", b"")
         else:
@@ -2360,6 +2566,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if fn and oid in ("widget", "bar"):
                 try:
                     fn(oid)
+                except Exception:
+                    pass
+            self._send(200, "application/json", b'{"ok":true}')
+        elif path == "/api/remote":
+            action = (self._read_json() or {}).get("action", "")
+            fn = CONTROL.get("remote_action")
+            if fn and action in ("rotate", "unpair", "sync"):
+                try:
+                    fn(action)
                 except Exception:
                     pass
             self._send(200, "application/json", b'{"ok":true}')
@@ -2796,6 +3011,8 @@ class TrayApp:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._started_notified = False
+        self._last_remote_sync = 0.0
+        self._remote_last_ok = None
 
     def build_menu(self):
         import pystray
@@ -2838,6 +3055,9 @@ class TrayApp:
         CONTROL["update"] = lambda: threading.Thread(target=self._do_update, daemon=True).start()
         CONTROL["set_config"] = self._set_config       # the tray is the single config writer
         CONTROL["toggle_overlay"] = self._toggle_overlay
+        CONTROL["remote_action"] = self._remote_action
+        global REMOTE_PUSH
+        REMOTE_PUSH = self._remote_push                # mirror toasts to the paired phone
         threading.Thread(target=self._poll_loop, daemon=True).start()
         if self.cfg.get("show_widget_on_start", True):
             self.widget_proc = self._spawn_mode("--widget")
@@ -2917,6 +3137,39 @@ class TrayApp:
             except Exception as exc:
                 log(f"config save failed: {exc}")
             self._config_epoch += 1
+
+    # ----- remote sync (optional, opt-in) -----
+    def _remote_on(self) -> bool:
+        return bool(self.cfg.get("remote_enabled") and self.cfg.get("remote_relay_url")
+                    and remote_available())
+
+    def _remote_sync_now(self, snap: dict) -> None:
+        try:
+            self._remote_last_ok = remote_sync_snapshot(snap, self.cfg)
+        except Exception:
+            self._remote_last_ok = False
+            log("remote: sync error:\n" + traceback.format_exc())
+
+    def _remote_push(self, title: str, msg: str) -> None:
+        if not self._remote_on():
+            return
+        threading.Thread(target=remote_push, args=(self.cfg, title, msg, title[:40]),
+                         daemon=True).start()
+
+    def _remote_action(self, action: str) -> None:
+        """Driven by POST /api/remote: rotate the key, unpair, or force a sync."""
+        if action == "rotate":
+            rotate_remote_identity()
+            self._config_epoch += 1
+        elif action == "unpair":
+            unpair_remote()
+            self._set_config({"remote_enabled": False})
+        elif action == "sync":
+            with STORE_LOCK:
+                snap = dict(STORE.get("snapshot", {}))
+            self._last_remote_sync = 0.0
+            if snap:
+                threading.Thread(target=self._remote_sync_now, args=(snap,), daemon=True).start()
 
     # menu handlers
     def _on_open(self, icon, item):
@@ -3201,10 +3454,21 @@ class TrayApp:
                                "show_widget_on_start", "show_bar_on_start", "status_components")}
                 snap["config_epoch"] = self._config_epoch
                 snap["overlays_alive"] = {"widget": self._widget_alive(), "bar": self._bar_alive()}
+                snap["remote"] = {"enabled": bool(self.cfg.get("remote_enabled")),
+                                  "relay_url": self.cfg.get("remote_relay_url", ""),
+                                  "available": remote_available(),
+                                  "paired": load_remote_identity(create=False) is not None,
+                                  "last_sync_ok": self._remote_last_ok}
                 self._verdict = (snap.get("verdict") or {}).get("text", "")
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
                 self._refresh_visual(r)
+                # Relay the snapshot to the phone (opt-in, E2EE), throttled + off-thread.
+                if self._remote_on():
+                    iv = max(15, int(self.cfg.get("remote_sync_seconds", 60)))
+                    if now - self._last_remote_sync >= iv:
+                        self._last_remote_sync = now
+                        threading.Thread(target=self._remote_sync_now, args=(snap,), daemon=True).start()
                 # Fold newly-written session bytes into lifetime totals. Runs after
                 # the live snapshot is published so the first (full-history) backfill
                 # never delays first paint; the result lands in the next snapshot.
