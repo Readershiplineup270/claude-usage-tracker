@@ -1,0 +1,18 @@
+# Claude Usage Tracker — remote relay (Cloudflare Worker)
+# See docs/REMOTE.md for the full contract.
+name = "claude-usage-relay"
+main = "src/index.js"
+compatibility_date = "2026-06-01"
+workers_dev = true
+
+# Create with: npx wrangler kv namespace create KV
+# then paste the returned id below (and a preview_id from `--preview`).
+[[kv_namespaces]]
+binding = "KV"
+id = "0123456789abcdef0123456789abcdef"          # <-- REPLACE with your KV namespace id
+preview_id = "0123456789abcdef0123456789abcdef"  # <-- REPLACE for `wrangler dev`
+
+# Push secrets (do NOT put these here — set them out of band):
+#   npx wrangler secret put FCM_PROJECT_ID
+#   npx wrangler secret put FCM_CLIENT_EMAIL
+#   npx wrangler secret put FCM_PRIVATE_KEY     # paste the service-account private_key (PEM)

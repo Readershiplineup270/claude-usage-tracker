@@ -25,6 +25,13 @@ dependencies = [
     "pywebview>=5.0",
 ]
 
+# Optional: remote/phone sync (end-to-end encryption + pairing QR). See docs/REMOTE.md.
+[project.optional-dependencies]
+remote = [
+    "PyNaCl>=1.5",
+    "qrcode>=7.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/paris-paraskevas/claude-usage-tracker"
 Issues = "https://github.com/paris-paraskevas/claude-usage-tracker/issues"
